@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Pulse — server panel</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%2322d3ee'/%3E%3Cstop offset='1' stop-color='%23a78bfa'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='url(%23g)' stroke-width='2.5'/%3E%3Cpath d='M7 16h5l2.5-6 4 12 2.5-6h4' fill='none' stroke='url(%23g)' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css?v=27">
+</head>
+<body>
+<div class="fx-bg" aria-hidden="true"></div>
+<header id="topbar">
+  <a class="logo" href="#/">
+    <span class="logo-dot"></span>
+    <span class="logo-text">Pulse</span>
+    <span class="logo-sub">server panel</span>
+  </a>
+  <div id="tb-nav">
+    <nav id="node-pills">
+      <a class="pill pill-main" id="pill-main" href="#/main" title="Main — fleet list, Cloudflare DDNS & Wake-on-LAN">
+        <svg class="ic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>Main
+      </a>
+      <a class="pill pill-install" id="pill-install" href="#/install" title="Install — one-line installer commands & docs">
+        <svg class="ic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Install
+      </a>
+    </nav>
+  </div>
+  <div id="tb-extra">
+  <div class="top-right">
+    <div class="pollctl" id="pollctl">
+      <button type="button" class="poll-btn" id="poll-btn" title="Dashboard refresh interval" aria-haspopup="listbox" aria-expanded="false">
+        <svg class="ic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>
+        <span id="poll-label">2s</span>
+        <svg class="poll-chev" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div class="poll-drop" id="poll-drop" role="listbox" hidden>
+        <div class="pd-head">Refresh every</div>
+        <button type="button" class="pd-opt" role="option" data-ms="100" aria-selected="false"><span class="pd-v">100<i>ms</i></span></button>
+        <button type="button" class="pd-opt" role="option" data-ms="500" aria-selected="false"><span class="pd-v">500<i>ms</i></span></button>
+        <button type="button" class="pd-opt" role="option" data-ms="1000" aria-selected="false"><span class="pd-v">1<i>s</i></span></button>
+        <button type="button" class="pd-opt" role="option" data-ms="2000" aria-selected="false"><span class="pd-v">2<i>s</i></span></button>
+        <button type="button" class="pd-opt" role="option" data-ms="5000" aria-selected="false"><span class="pd-v">5<i>s</i></span></button>
+        <button type="button" class="pd-opt" role="option" data-ms="10000" aria-selected="false"><span class="pd-v">10<i>s</i></span></button>
+      </div>
+    </div>
+    <span id="clock" class="mono"></span>
+    <span class="live"><span class="live-dot"></span><span class="live-txt">LIVE</span></span>
+  </div>
+  </div>
+  <button id="burger" aria-label="Open menu" aria-controls="m-menu" aria-expanded="false">
+    <span class="bl"></span><span class="bl"></span><span class="bl"></span>
+  </button>
+</header>
+<main id="view"><div class="loading">connecting to pulse server…</div></main>
+<div id="modal-root"></div>
+<div id="m-backdrop"></div>
+<aside id="m-menu" aria-hidden="true">
+  <div class="mm-head">
+    <span class="logo-dot"></span>
+    <span class="logo-text">Pulse</span>
+    <span class="logo-sub">server panel</span>
+    <button id="mm-close" aria-label="Close menu">
+      <svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="mm-body">
+    <div class="mm-sec">Navigate</div>
+    <div id="mm-nav"></div>
+    <div class="mm-sec">Dashboard</div>
+    <div id="mm-extra"></div>
+  </div>
+</aside>
+<div id="toast-root"></div>
+<script src="/app.js?v=26"></script>
+</body>
+</html>

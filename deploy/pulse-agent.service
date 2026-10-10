@@ -1,0 +1,18 @@
+[Unit]
+Description=Pulse monitoring agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/YOURUSER/pulse/pulse_agent.py --config /home/YOURUSER/pulse/agent.conf
+Restart=always
+RestartSec=3
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/opt/rocm/bin
+# NOTE: if agent-launched llama-server dies with "no ROCm-capable device is
+# detected" but works from a shell, the user manager's groups are stale
+# (no render/video -> no /dev/kfd). Fix: sudo systemctl restart user@$(id -u)
+# (or reboot). Do NOT add SupplementaryGroups=render video here: if the
+# manager lacks the groups, systemd fails the unit with 216/GROUP.
+
+[Install]
+WantedBy=default.target

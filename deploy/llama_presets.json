@@ -1,0 +1,6 @@
+[
+  {
+    "name": "example-model",
+    "args": "/path/to/llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080 --ctx-size 8192 --threads 6 --gpu-layers all"
+  }
+]

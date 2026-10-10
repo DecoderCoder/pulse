@@ -1,0 +1,14 @@
+{
+  "devices": [
+    {
+      "name": "NAS",
+      "mac": "00:11:22:33:44:55",
+      "ip": ""
+    },
+    {
+      "name": "Printer",
+      "mac": "aa:bb:cc:dd:ee:ff",
+      "ip": ""
+    }
+  ]
+}

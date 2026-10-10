@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pulse — sign in</title>
+<link rel="stylesheet" href="/keygate.css">
+</head>
+<body>
+  <div class="kg-wrap">
+    <div class="kg-card">
+      <div class="kg-title"><span class="kg-dot"></span>Pulse</div>
+      <div class="kg-sub">
+        This panel is private. Enter the panel API key to continue —
+        it is then kept in a 30-day cookie, so you only type it once.
+      </div>
+      <form action="/" method="get">
+        <input type="password" name="key" id="kg-input" placeholder="API key"
+               autocomplete="off" autofocus required spellcheck="false">
+        <button type="submit">Unlock</button>
+      </form>
+      <div class="kg-hint">
+        Tip: opening <code>/?key=&lt;your key&gt;</code> works too.
+      </div>
+    </div>
+  </div>
+</body>
+</html>

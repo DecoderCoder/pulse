@@ -1,0 +1,13 @@
+[Unit]
+Description=Pulse monitoring server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/home/YOURUSER/.pulse-server.env
+ExecStart=/usr/bin/python3 /home/YOURUSER/pulse/pulse_server.py --port 8090
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
