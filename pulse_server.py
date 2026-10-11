@@ -26,14 +26,20 @@ Endpoints:
   GET/POST /nic/update FRITZ!Box-style DynDNS endpoint (own Basic auth,
                         not behind the API-key gate — see below)
   GET  /install.sh    one-line installer (public, same pattern as
-  GET  /install/<f>   /nic/update): serves install.sh with its
-                      INSTALL_BASE="" line replaced by this server's
-                      LAN base URL (http://<lan-ip>:<port>,
-                      auto-detected; PULSE_LAN_IP overrides it) plus
-                      the whitelisted assets the script downloads from
-                      this host. /api/state (key-gated) also carries an
-                      "install" block {url, token} that the dashboard's
-                      Install tab renders as copy-ready one-liners
+  GET  /install/<f>   /nic/update): serves install.sh with two blank
+                      assignments filled in: INSTALL_BASE="" -> this
+                      server's LAN base URL (http://<lan-ip>:<port>,
+                      auto-detected; PULSE_LAN_IP overrides it) and
+                      DOWNLOAD_ORIGIN="" -> the URL the request came
+                      in as (scheme://host; https when a TLS proxy
+                      set X-Forwarded-Proto), so the installer
+                      downloads the code back from the host that
+                      served the script (server mode must work off
+                      the server's LAN). Plus the whitelisted
+                      assets. /api/state (key-gated) also carries an
+                      "install" block {url, token} that the
+                      dashboard's Install tab renders as copy-ready
+                      one-liners
   GET  /*              static dashboard (web/)
 
 Auth:
@@ -1483,7 +1489,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, "not found", "text/plain")
             body = fp.read_bytes().replace(
                 b'INSTALL_BASE=""',
-                ('INSTALL_BASE="%s"' % INSTALL_URL).encode())
+                ('INSTALL_BASE="%s"' % INSTALL_URL).encode()).replace(
+                b'DOWNLOAD_ORIGIN=""',
+                ('DOWNLOAD_ORIGIN="%s"' % request_origin(self)).encode())
             return self._send(200, body, "text/x-shellscript; charset=utf-8",
                               headers={"X-Content-Type-Options": "nosniff",
                                        "Referrer-Policy": "no-referrer"})
@@ -1597,6 +1605,26 @@ def lan_base_url(port):
         finally:
             s.close()
     return "http://%s:%d" % (ip, port)
+
+
+def request_origin(h):
+    """The URL this request came in as: http(s)://host[:port].
+
+    Injected into the served install.sh as DOWNLOAD_ORIGIN so the
+    installer downloads the code back from the very host that served
+    the script: server mode must work on boxes that are not on this
+    server's LAN (a second deployment, another network) - a LAN base
+    URL would be unreachable there. Proto is https only if the first
+    X-Forwarded-Proto value is https (a TLS proxy in front);
+    deliberately independent of PULSE_TLS_PROXY, which governs cookies
+    and client IPs. Empty if there is no Host header (the installer
+    then falls back to its other download bases)."""
+    host = h.headers.get("Host", "")
+    if not host:
+        return ""
+    xfp = h.headers.get("X-Forwarded-Proto", "")
+    proto = "https" if xfp.split(",")[0].strip() == "https" else "http"
+    return "%s://%s" % (proto, host)
 
 
 def main():

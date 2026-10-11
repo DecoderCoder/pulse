@@ -15,7 +15,9 @@
 #
 # Modes:
 #   server  installs the central server AND an agent on the same box
-#           (the agent reports to http://127.0.0.1:<PORT>).
+#           (the agent reports to http://127.0.0.1:<PORT>). Works from
+#           any network — the code downloads back from the host that
+#           served this script (LAN or public domain).
 #   client  installs only the agent, pointing it at the server that hosts
 #           this script (or at the explicit SERVER_URL) with the shared
 #           ingest TOKEN.
@@ -38,12 +40,18 @@
 
 set -euo pipefail
 
-# When this script is fetched via /install.sh, the server replaces the
-# empty value below with its LAN base URL (e.g.
-# http://192.168.178.12:8090) — agents always talk over the LAN, never
-# through a public endpoint. When run from a local copy it stays empty
-# and client mode requires an explicit SERVER_URL.
+# When this script is fetched via /install.sh, the server fills the two
+# empty assignments below:
+#   INSTALL_BASE     = its LAN base URL (e.g. http://192.168.178.12:8090)
+#                      — agents always talk over the LAN, never through
+#                      a public endpoint
+#   DOWNLOAD_ORIGIN  = the URL this script was fetched from — code is
+#                      always downloaded back from that host, so server
+#                      mode works on boxes NOT on that server's LAN
+# When run from a local copy both stay empty: client mode requires an
+# explicit SERVER_URL, server mode downloads from the local server.
 INSTALL_BASE=""
+DOWNLOAD_ORIGIN=""
 
 usage() {
   cat <<'EOF'
@@ -54,6 +62,8 @@ Pulse installer — usage:
   client   agent only:            client [SERVER_URL] [TOKEN]
   server   central server + local agent on the same box
            (agent -> http://127.0.0.1:PORT):  server [PORT]
+           (works from any network — code downloads back from the host
+            that served this script)
 
   SERVER_URL  where the agent reports; default: the server hosting this
                script when fetched via /install.sh (always its LAN URL)
@@ -121,10 +131,27 @@ fi
 URL="${URL%/}"
 [ -n "$URL" ] || die "empty SERVER_URL"
 case "$URL" in http://*|https://*) ;; *) die "SERVER_URL must start with http:// or https://, got: $URL" ;; esac
-# code is always downloaded from the server that hosts this script
-# (fetched copy); a local copy falls back to the target URL itself
-DOWNLOAD_BASE="$URL"
-[ -n "$INSTALL_BASE" ] && DOWNLOAD_BASE="${INSTALL_BASE%/}"
+# Where the code downloads come from:
+#   client — the server's LAN URL (INSTALL_BASE): node data is LAN-only,
+#            so a box that cannot reach that address is not a valid
+#            client box — fail fast here, not after installing an agent
+#            that can only time out / 403.
+#   server — the URL this script was fetched from (DOWNLOAD_ORIGIN): a
+#            new central server may live on another network than the
+#            one that hosts the script (second deployment, other LAN),
+#            so its code download goes back over the public endpoint.
+# A local copy falls back to the target URL itself (127.0.0.1 in server
+# mode — re-running while the server already runs works).
+case "$MODE" in
+  server)
+    DOWNLOAD_BASE="$URL"
+    [ -n "$DOWNLOAD_ORIGIN" ] && DOWNLOAD_BASE="${DOWNLOAD_ORIGIN%/}"
+    ;;
+  client)
+    DOWNLOAD_BASE="$URL"
+    [ -n "$INSTALL_BASE" ] && DOWNLOAD_BASE="${INSTALL_BASE%/}"
+    ;;
+esac
 
 # ---------------- helpers ----------------
 gen_secret() { python3 -c 'import secrets; print(secrets.token_hex(16))'; }
@@ -172,7 +199,12 @@ echo "downloading from $DOWNLOAD_BASE/install/ …"
 for f in $ASSETS; do
   dest="$TMP/$f"
   mkdir -p "$(dirname "$dest")"
-  fetch "$DOWNLOAD_BASE/install/$f" "$dest" || die "failed to download $f from $DOWNLOAD_BASE/install/$f — is this box on the server's LAN? (installs and node data only flow over the LAN)"
+  if ! fetch "$DOWNLOAD_BASE/install/$f" "$dest"; then
+    if [ "$MODE" = server ]; then
+      die "failed to download $f from $DOWNLOAD_BASE/install/$f — the host that served this script (or the local server) must be reachable"
+    fi
+    die "failed to download $f from $DOWNLOAD_BASE/install/$f — is this box on the server's LAN? (installs and node data only flow over the LAN)"
+  fi
   [ -s "$dest" ] || die "downloaded $f is empty"
 done
 # optional extras (tolerate 404 — not every server has them)
@@ -328,15 +360,18 @@ if [ "$MODE" = server ]; then
   echo
   echo "PANEL API KEY (shown once — store it now, it opens the dashboard):"
   echo "    $API_KEY"
-  if [ -n "$INSTALL_BASE" ]; then
-    echo "panel:  $INSTALL_BASE"
+  # This box's own LAN base URL — not INSTALL_BASE, which belongs to the
+  # server that served the script (it may live on another network).
+  LOCAL_IP="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -1)"
+  if [ -n "$LOCAL_IP" ]; then
+    PANEL="http://$LOCAL_IP:$PORT"
   else
-    echo "panel:  http://$(hostname 2>/dev/null || echo localhost):$PORT"
+    PANEL="http://$(hostname 2>/dev/null || echo localhost):$PORT"
   fi
+  echo "panel:  $PANEL"
   echo
   echo "notes:"
-  PANEL="${INSTALL_BASE:-$URL}"
-  echo "  * agents on other boxes (must be on the server's LAN):"
+  echo "  * agents on other boxes (must be on this server's LAN):"
   echo "      curl -fsSL $PANEL/install.sh | bash -s -- client $PANEL $TOKEN"
   echo "  * a TLS proxy (Caddy/nginx) in front sets Secure cookies (PULSE_TLS_PROXY=$TLS)"
   echo "    — firewall :$PORT to the proxy host and your LAN"

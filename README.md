@@ -26,10 +26,12 @@ The dashboard's **Install** tab holds the exact one-liners for *your* server —
 with the ingest token already filled in — plus copy buttons. The form:
 
 On the machine that should be the **central server** (also installs the local
-agent, like a normal node reporting to `127.0.0.1`):
+agent, like a normal node reporting to `127.0.0.1`). Server mode works from
+**any network** — fetch it from the public domain if the new server isn't on
+the existing one's LAN (second deployment):
 
 ```bash
-curl -fsSL http://<server-lan-ip>:8090/install.sh | bash -s -- server
+curl -fsSL https://<server-domain>/install.sh | bash -s -- server
 ```
 
 On **every other machine** (agent only, reports to that server):
@@ -43,20 +45,28 @@ travels as a command-line argument, never inside the served script; an
 explicit token wins over one already stored on the box, and client mode with
 no token anywhere **refuses to run** — it never invents one.
 
-All of this is LAN-only by design: agents always point at the server's LAN
-URL, and the public edge answers 403 to `POST /api/ingest`. When the server
-serves `/install.sh` it rewrites the script with its own auto-detected LAN
-address (`INSTALL_BASE="http://<lan-ip>:8090"` — the default-route egress
-interface, override with `PULSE_LAN_IP` in `~/.pulse-server.env`), so even a
-script fetched through the public domain produces a LAN one-liner, and the
-code download stays on the LAN.
+Node data is LAN-only by design: agents always point at the server's LAN URL,
+and the public edge answers 403 to `POST /api/ingest`. When the server serves
+`/install.sh` it rewrites two blank assignments in the script:
+`INSTALL_BASE="http://<lan-ip>:8090"` — its own auto-detected LAN address
+(default-route egress interface, override with `PULSE_LAN_IP` in
+`~/.pulse-server.env`) — and `DOWNLOAD_ORIGIN="<the URL the request came in
+as>"`. The agent's `SERVER_URL` always defaults to the LAN URL (so even a
+script fetched through the public domain produces a LAN one-liner), and the
+code download follows the mode: **client** mode downloads from the LAN base —
+a box that can't reach it isn't a valid client box, so the installer fails
+fast instead of installing an agent that could only 403 or time out — while
+**server** mode downloads from the origin that served the script: a new
+central server may live on another network entirely, so its code comes back
+over the public endpoint while everything it runs stays local.
 
 The installer:
 
 1. checks prerequisites (`python3` — installed via apt/dnf/pacman if missing,
    `curl`/`wget`, a systemd user session);
 2. downloads the current code straight from the server (`/install/…` — a
-   whitelisted endpoint on the same base the script came from);
+   whitelisted endpoint; client mode from the LAN base, server mode from the
+   host that served the script);
 3. writes `~/pulse/` (code + configs, `chmod 600`) — existing token / API key
    are reused (a token from the command line wins), re-running is idempotent;
 4. installs + enables + restarts the systemd **user** units
@@ -187,7 +197,7 @@ by design.
 | `POST /api/wol/wake/<name>` | fire the magic packet for one device |
 | `GET /api/health` | liveness + node count |
 | `GET /nic/update` | **public** No-IP-style endpoint for router DynDNS (`?hostname=…&myip=…&myipv6=…`), own Basic-auth check (optional — unset = closed), own lockout; responses `good <ip>`, `badauth`, `nohost`, `badip`, `disabled` |
-| `GET /install.sh` / `GET /install/<file>` | **public** bootstrap: the installer (with the server's auto-detected **LAN** base URL substituted in — never the request origin) and the whitelisted install assets — agent, server, `web/*`, `deploy.sh`, `llama_presets.json` |
+| `GET /install.sh` / `GET /install/<file>` | **public** bootstrap: the installer (with two blank lines filled in: `INSTALL_BASE` = the server's auto-detected **LAN** base URL — never the request origin — and `DOWNLOAD_ORIGIN` = the URL the request came in as, so server mode can install off-LAN) and the whitelisted install assets — agent, server, `web/*`, `deploy.sh`, `llama_presets.json` |
 
 ## Configuration
 
