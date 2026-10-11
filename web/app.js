@@ -65,6 +65,7 @@ const state = {
   online: false,
   ddns: null,   // compact Cloudflare DDNS status from /api/state
   wol: null,    // compact Wake-on-LAN status from /api/state
+  install: null, // {url, token} — server LAN URL + ingest token for the Install tab
 };
 const liveBuf = {};   // node -> {cpu:[[ts,val]], mem:[], ...}
 const tm = { sortKey: "cpu", sortDir: -1, q: "", node: null, lastData: null };
@@ -712,8 +713,20 @@ function updateMain() {
 
 /* ---------------- install view (static docs, no live data) ---------------- */
 
-function installOneLiner(mode, extra = "") {
-  return "curl -fsSL " + location.origin + "/install.sh | bash -s -- " + mode + extra;
+function installOneLiner() {
+  // The server tells us its LAN base URL + ingest token via /api/state.
+  // Node data flows over the LAN only, so even a dashboard opened through
+  // the public domain renders one-liners pointing at the LAN URL.
+  const inst = state.install || {};
+  const base = String(inst.url || location.origin).replace(/\/+$/, "");
+  const token = inst.token || "";
+  return {
+    base,
+    token,
+    server: "curl -fsSL " + base + "/install.sh | bash -s -- server",
+    client: "curl -fsSL " + base + "/install.sh | bash -s -- client " + base +
+      (token ? " " + token : ""),
+  };
 }
 
 async function copyCmd(btn) {
@@ -742,8 +755,9 @@ async function copyCmd(btn) {
 
 function openInstall() {
   state.view = { type: "install" };
-  const serverCmd = installOneLiner("server");
-  const clientCmd = installOneLiner("client");
+  const one = installOneLiner();
+  const serverCmd = one.server;
+  const clientCmd = one.client;
   const v = $("#view");
   v.innerHTML = `
     <div class="main-hero">
@@ -774,7 +788,7 @@ function openInstall() {
       <div class="cmd-card"><code>${esc(clientCmd)}</code>
         <button type="button" class="cmd-copy" data-copy="${esc(clientCmd)}">copy</button>
       </div>
-      <p class="inst-p">Agent-only install for another machine: it reports to the central server every 2 seconds and exposes the action API (process kill, Docker, llama.cpp). An optional second argument is the server URL (defaults to this server when run from it), an optional third argument is the port (default <span class="mono">8090</span>).</p>
+      <p class="inst-p">Agent-only install for another machine <b>on the same LAN</b>: it reports to the central server every 2 seconds and exposes the action API (process kill, Docker, llama.cpp). The command above already contains the server URL and the ingest <span class="mono">TOKEN</span> — node data only ever flows over the LAN, never through the public endpoint. Arguments: <span class="mono">client [SERVER_URL] [TOKEN]</span>.</p>
     </section>
     <section class="main-sec">
       <div class="section-head">
@@ -785,7 +799,7 @@ function openInstall() {
       <ol class="inst-steps">
         <li>Checks prerequisites: <span class="mono">python3</span> (installed via the distro package manager if missing), <span class="mono">curl</span> or <span class="mono">wget</span>, and a systemd user session. Run it as a regular user — sudo is only needed when a package has to be installed.</li>
         <li>Downloads the current code straight from the server (<span class="mono">client</span>: agent; <span class="mono">server</span>: server, agent and dashboard files).</li>
-        <li>Writes <span class="mono">~/pulse/</span> with the code and configs (mode 600). Existing tokens and API keys are reused, never regenerated.</li>
+        <li>Writes <span class="mono">~/pulse/</span> with the code and configs (mode 600). Server mode generates a token + API key when nothing exists; client mode uses the token from the command (or one already on the box) and never invents one. Re-running is idempotent.</li>
         <li>Installs the systemd user units <span class="mono">pulse-agent</span> (plus <span class="mono">pulse-server</span> in server mode), enables and starts them.</li>
         <li>Prints the service status. In server mode it also prints the dashboard URL and the API key — last chance, it is not shown again.</li>
       </ol>
@@ -800,8 +814,9 @@ function openInstall() {
         <tr><th>arg</th><th>meaning</th></tr>
         <tr><td><span class="mono">server</span></td><td>central server + local agent on this box (required first argument)</td></tr>
         <tr><td><span class="mono">client</span></td><td>agent only on this box (required first argument)</td></tr>
-        <tr><td><span class="mono">SERVER_URL</span></td><td>optional — where the agent reports; defaults to this server</td></tr>
-        <tr><td><span class="mono">PORT</span></td><td>optional — server port; default 8090</td></tr>
+        <tr><td><span class="mono">SERVER_URL</span></td><td>client mode — where the agent reports; default: this server's LAN URL</td></tr>
+        <tr><td><span class="mono">TOKEN</span></td><td>client mode — the shared ingest token, shown in the command above; never generated on the client</td></tr>
+        <tr><td><span class="mono">PORT</span></td><td>server mode — server port; default 8090</td></tr>
         <tr><td><span class="mono">--dry-run</span></td><td>download everything and show what would be done, change nothing</td></tr>
       </table>
     </section>
@@ -2395,6 +2410,7 @@ async function tick() {
     state.serverTs = d.ts;
     state.ddns = d.ddns || null;
     state.wol = d.wol || null;
+    state.install = d.install || null;
     Object.values(d.nodes).forEach(nd => {
       if (nd.latest && nd.latest.ts) appendLive(Object.keys(d.nodes).find(n => d.nodes[n] === nd), nd.latest);
     });

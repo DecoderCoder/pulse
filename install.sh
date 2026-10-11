@@ -1,29 +1,34 @@
 #!/usr/bin/env bash
 # Pulse — one-line installer (bootstrap)
 #
-#   curl -fsSL https://pulse.decodercoder.com/install.sh | bash -s -- server
-#   curl -fsSL https://pulse.decodercoder.com/install.sh | bash -s -- client
+#   curl -fsSL http://<server>:8090/install.sh | bash -s -- server
+#   curl -fsSL http://<server>:8090/install.sh | bash -s -- client <SERVER_URL> <TOKEN>
+#
+# The exact commands (token already filled in) are on the dashboard's
+# Install tab. Node data flows over the LAN only: agents always point at
+# the server's LAN URL, never at a public endpoint.
 #
 # or from a local copy:
 #
-#   bash install.sh server                      # central server + its own agent
-#   bash install.sh client http://192.168.178.12:8090
-#   bash install.sh client "" 8090 --dry-run
+#   bash install.sh server                     # central server + its own agent
+#   bash install.sh client http://<server>:8090 <TOKEN>
 #
 # Modes:
 #   server  installs the central server AND an agent on the same box
 #           (the agent reports to http://127.0.0.1:<PORT>).
 #   client  installs only the agent, pointing it at the server that hosts
-#           this script (or at the explicit SERVER_URL argument).
+#           this script (or at the explicit SERVER_URL) with the shared
+#           ingest TOKEN.
 #
 # What it does (no root needed — systemd *user* units):
 #   * checks python3 (installs it via apt/dnf/pacman if missing), curl/wget,
 #     and a systemd user session
 #   * downloads pulse_agent.py / pulse_server.py + web/ from
 #     <SERVER_URL>/install/... (whitelisted on the server side)
-#   * writes ~/pulse/agent.conf and ~/.pulse-server.env (server mode),
-#     generating a fresh ingest token + API key when nothing exists —
-#     re-running is idempotent and keeps existing secrets
+#   * writes ~/pulse/agent.conf and ~/.pulse-server.env (server mode);
+#     server mode generates a fresh ingest token + API key when nothing
+#     exists, client mode takes the token as an argument (or reuses one
+#     already on the box) and never invents one — re-running is idempotent
 #   * installs + enables + restarts the pulse-agent / pulse-server user units
 #   * prints the API key (server mode) and the linger/firewall notes
 #
@@ -34,23 +39,28 @@
 set -euo pipefail
 
 # When this script is fetched via /install.sh, the server replaces the
-# empty value below with the request origin (e.g.
-# https://pulse.decodercoder.com). When run from a local copy it stays
-# empty and client mode requires an explicit SERVER_URL.
+# empty value below with its LAN base URL (e.g.
+# http://192.168.178.12:8090) — agents always talk over the LAN, never
+# through a public endpoint. When run from a local copy it stays empty
+# and client mode requires an explicit SERVER_URL.
 INSTALL_BASE=""
 
 usage() {
   cat <<'EOF'
 Pulse installer — usage:
 
-  bash install.sh <client|server> [SERVER_URL] [PORT] [--dry-run]
+  bash install.sh <client|server> [args...] [--dry-run]
 
-  server   central server + local agent (agent -> http://127.0.0.1:PORT)
-  client   agent only (points at SERVER_URL, or at the server hosting
-           this script when fetched via /install.sh)
+  client   agent only:            client [SERVER_URL] [TOKEN]
+  server   central server + local agent on the same box
+           (agent -> http://127.0.0.1:PORT):  server [PORT]
 
-  SERVER_URL  default: this server (server mode) / the fetch origin (client)
-  PORT        default: 8090
+  SERVER_URL  where the agent reports; default: the server hosting this
+               script when fetched via /install.sh (always its LAN URL)
+  TOKEN       the shared ingest token (see the dashboard's Install tab);
+               required for client mode unless this box already has one
+               in ~/pulse/agent.conf or ~/.pulse-server.env
+  PORT        server mode only; default: 8090
   --dry-run   preview everything, change nothing
 EOF
 }
@@ -61,7 +71,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---------------- arguments ----------------
 DRY_RUN=0
-MODE="" URL="" PORT=8090
+MODE="" URL="" PORT=8090 TOKEN_ARG=""
 POS=0
 for a in "$@"; do
   case "$a" in
@@ -69,12 +79,21 @@ for a in "$@"; do
     -h|--help)      usage; exit 0 ;;
     -*)             die "unknown option: $a (see --help)" ;;
     *)
+      [ -n "$MODE" ] || { MODE="$a"; continue; }
       POS=$((POS + 1))
-      case $POS in
-        1) MODE="$a" ;;
-        2) URL="$a" ;;
-        3) PORT="$a" ;;
-        *) die "too many positional arguments: $a (see --help)" ;;
+      case "$MODE" in
+        client)
+          case $POS in
+            1) URL="$a" ;;
+            2) TOKEN_ARG="$a" ;;
+            *) die "too many positional arguments for client mode: $a (see --help)" ;;
+          esac ;;
+        server)
+          case $POS in
+            1) PORT="$a" ;;
+            *) die "too many positional arguments for server mode: $a (see --help)" ;;
+          esac ;;
+        *) die "unknown mode: $MODE (use client or server)" ;;
       esac ;;
   esac
 done
@@ -91,7 +110,7 @@ esac
 if [ -z "$INSTALL_BASE" ] && [ -z "$URL" ]; then
   if [ "$MODE" = client ]; then
     die "no server URL known (local copy of install.sh) — pass it explicitly:
-    bash install.sh client http://<server-host>:8090"
+    bash install.sh client http://<server-host>:8090 <TOKEN>"
   fi
   # server mode: the agent points at localhost, nothing to fetch from a base
 fi
@@ -102,6 +121,10 @@ fi
 URL="${URL%/}"
 [ -n "$URL" ] || die "empty SERVER_URL"
 case "$URL" in http://*|https://*) ;; *) die "SERVER_URL must start with http:// or https://, got: $URL" ;; esac
+# code is always downloaded from the server that hosts this script
+# (fetched copy); a local copy falls back to the target URL itself
+DOWNLOAD_BASE="$URL"
+[ -n "$INSTALL_BASE" ] && DOWNLOAD_BASE="${INSTALL_BASE%/}"
 
 # ---------------- helpers ----------------
 gen_secret() { python3 -c 'import secrets; print(secrets.token_hex(16))'; }
@@ -145,17 +168,17 @@ trap 'rm -rf "$TMP"' EXIT
 ASSETS="pulse_agent.py"
 [ "$MODE" = server ] && ASSETS="pulse_agent.py pulse_server.py web/index.html web/app.js web/style.css web/keygate.html web/keygate.css"
 
-echo "downloading from $URL/install/ …"
+echo "downloading from $DOWNLOAD_BASE/install/ …"
 for f in $ASSETS; do
   dest="$TMP/$f"
   mkdir -p "$(dirname "$dest")"
-  fetch "$URL/install/$f" "$dest" || die "failed to download $f from $URL/install/$f"
+  fetch "$DOWNLOAD_BASE/install/$f" "$dest" || die "failed to download $f from $DOWNLOAD_BASE/install/$f — is this box on the server's LAN? (installs and node data only flow over the LAN)"
   [ -s "$dest" ] || die "downloaded $f is empty"
 done
 # optional extras (tolerate 404 — not every server has them)
 for f in llama_presets.json deploy.sh; do
   dest="$TMP/$f"
-  fetch "$URL/install/$f" "$dest" 2>/dev/null || rm -f "$dest"
+  fetch "$DOWNLOAD_BASE/install/$f" "$dest" 2>/dev/null || rm -f "$dest"
 done
 
 # sanity: real pulse sources, not an HTML error page
@@ -180,10 +203,15 @@ get_val() { # $1 file, $2 key -> value (or empty)
 }
 
 TOKEN=""
-if [ -f "$ENV_FILE" ]; then
+if [ -n "$TOKEN_ARG" ]; then
+  TOKEN="$TOKEN_ARG"
+  echo "ingest token: from the command line"
+elif [ -f "$ENV_FILE" ]; then
   TOKEN="$(get_val "$ENV_FILE" PULSE_TOKEN)"
+  [ -n "$TOKEN" ] && echo "ingest token: reused from $ENV_FILE"
 elif [ -f "$CONF_FILE" ]; then
   TOKEN="$(get_val "$CONF_FILE" TOKEN)"
+  [ -n "$TOKEN" ] && echo "ingest token: reused from $CONF_FILE"
 fi
 API_KEY="" TLS=0
 if [ -f "$ENV_FILE" ]; then
@@ -192,7 +220,15 @@ if [ -f "$ENV_FILE" ]; then
   TLS="$(get_val "$ENV_FILE" PULSE_TLS_PROXY)"
   [ -n "$TLS" ] || TLS=0
 fi
-[ -n "$TOKEN" ] || { TOKEN="$(gen_secret)"; echo "generated new ingest token"; }
+if [ -z "$TOKEN" ]; then
+  if [ "$MODE" = server ]; then
+    TOKEN="$(gen_secret)"; echo "generated new ingest token"
+  else
+    die "no ingest token found — client mode never invents one.
+Copy the agent one-liner from the server's dashboard (Install tab);
+it already contains the server URL and the token."
+  fi
+fi
 [ -n "$API_KEY" ] || { API_KEY="$(gen_secret)"; echo "generated new api key"; }
 # installing over https implies a TLS-terminating proxy in front of this box
 case "$URL" in https://*) TLS=1 ;; esac
@@ -299,7 +335,9 @@ if [ "$MODE" = server ]; then
   fi
   echo
   echo "notes:"
-  echo "  * agents on other boxes:  curl -fsSL $URL/install.sh | bash -s -- client"
+  PANEL="${INSTALL_BASE:-$URL}"
+  echo "  * agents on other boxes (must be on the server's LAN):"
+  echo "      curl -fsSL $PANEL/install.sh | bash -s -- client $PANEL $TOKEN"
   echo "  * a TLS proxy (Caddy/nginx) in front sets Secure cookies (PULSE_TLS_PROXY=$TLS)"
   echo "    — firewall :$PORT to the proxy host and your LAN"
 fi

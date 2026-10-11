@@ -3,7 +3,9 @@
 Pulse Server — central collector + dashboard host. Single file, stdlib only.
 
 Endpoints:
-  POST /api/ingest     agent -> server snapshot (X-Pulse-Token)
+  POST /api/ingest     agent -> server snapshot (X-Pulse-Token). LAN-only
+                       by design — the public edge answers 403 for it and
+                       the installer always points agents at the LAN URL
   GET  /api/state      latest state of all nodes (dashboard)
   GET  /api/series     downsampled history  ?node=X&points=300
   POST /api/action     proxy action to an agent  {node, pid, sig} or
@@ -25,9 +27,13 @@ Endpoints:
                         not behind the API-key gate — see below)
   GET  /install.sh    one-line installer (public, same pattern as
   GET  /install/<f>   /nic/update): serves install.sh with its
-                      __INSTALL_BASE__ marker replaced by this request's
-                      origin, plus the whitelisted assets the script
-                      downloads from this host (agent, server, web files)
+                      INSTALL_BASE="" line replaced by this server's
+                      LAN base URL (http://<lan-ip>:<port>,
+                      auto-detected; PULSE_LAN_IP overrides it) plus
+                      the whitelisted assets the script downloads from
+                      this host. /api/state (key-gated) also carries an
+                      "install" block {url, token} that the dashboard's
+                      Install tab renders as copy-ready one-liners
   GET  /*              static dashboard (web/)
 
 Auth:
@@ -46,6 +52,10 @@ Config via environment:
   PULSE_TLS_PROXY 1 = a TLS-terminating reverse proxy sits in front:
                   Secure cookies + client IPs read from X-Forwarded-For.
                   (Firewall this port to the proxy host!)
+  PULSE_LAN_IP    override for the auto-detected LAN IP that goes into
+                  the installer's INSTALL_BASE and the dashboard's
+                  install one-liners (multi-homed boxes whose default
+                  route is not the Pulse LAN)
   PULSE_STATE_DIR ~/.pulse-server (also holds ddns.json, the Cloudflare
                     DDNS config, absent = DDNS disabled, and wol.json,
                     the Wake-on-LAN device list, absent = no devices)
@@ -75,7 +85,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlencode, urlparse
 
-SERVER_VERSION = "1.3.0"
+SERVER_VERSION = "1.4.0"
+INSTALL_URL = ""               # LAN base URL for the installer (set in main)
 ONLINE_WINDOW = 20.0          # seconds before a node is marked offline
 HISTORY_MAX = 10800           # ~6h at 2s resolution (per metric)
 HISTORY_PERSIST = 1800        # ~1h kept in state.json
@@ -1273,7 +1284,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "server": SERVER_VERSION,
                              "ts": now(), "nodes": nodes,
                              "ddns": self.ddns.state_line(),
-                             "wol": self.wol.state_line()})
+                             "wol": self.wol.state_line(),
+                             "install": {"url": INSTALL_URL,
+                                         "token": self.token}})
             return
         if path == "/api/series":
             if not self._authed():
@@ -1461,20 +1474,6 @@ class Handler(BaseHTTPRequestHandler):
         ("web/keygate.css", "web/keygate.css", MIME[".css"]),
     )
 
-    def _request_origin(self):
-        # The install origin must match how the user fetched this script.
-        # Trust X-Forwarded-Proto when a reverse proxy fronted the request
-        # (caddy/Cloudflare send it; direct LAN clients do not) — this is
-        # deliberate and independent of PULSE_TLS_PROXY, which gates cookie
-        # Secure flags and client-IP handling elsewhere.
-        proto = "https" if self.headers.get("X-Forwarded-Proto", "") \
-                .split(",")[0].strip().lower() == "https" \
-                else "http"
-        host = self.headers.get("Host") or ""
-        if not host:
-            addr = self.server.server_address
-            host = f"{addr[0]}:{addr[1]}" if len(addr) == 2 else str(addr[1])
-        return f"{proto}://{host}"
 
     def _install_request(self, path):
         base = Path(__file__).resolve().parent
@@ -1484,7 +1483,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, "not found", "text/plain")
             body = fp.read_bytes().replace(
                 b'INSTALL_BASE=""',
-                ('INSTALL_BASE="%s"' % self._request_origin()).encode())
+                ('INSTALL_BASE="%s"' % INSTALL_URL).encode())
             return self._send(200, body, "text/x-shellscript; charset=utf-8",
                               headers={"X-Content-Type-Options": "nosniff",
                                        "Referrer-Policy": "no-referrer"})
@@ -1575,6 +1574,31 @@ def ddns_refresh_loop(ddns):
             next_run = now() + 60   # disabled or busy — check again soon
 
 
+def lan_base_url(port):
+    """LAN base URL for the installer: http://<lan-ip>:<port>.
+
+    Agents report over the LAN only (node data never flows through the
+    public endpoint), so the served installer and the dashboard's
+    install one-liners always carry this server's LAN address. The
+    interface behind the default route is the LAN interface; the UDP
+    connect selects it without sending any packet. PULSE_LAN_IP
+    overrides the detection for multi-homed boxes."""
+    ip = os.environ.get("PULSE_LAN_IP", "").strip()
+    if not ip:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+        except Exception:
+            try:
+                ip = socket.gethostbyname(socket.gethostname())
+            except Exception:
+                ip = "127.0.0.1"
+        finally:
+            s.close()
+    return "http://%s:%d" % (ip, port)
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser(description="Pulse monitoring server")
@@ -1609,6 +1633,8 @@ def main():
     Handler.api_key = args.api_key
     Handler.auth_required = not args.no_auth
     Handler.tls_proxy = args.tls_proxy == "1"
+    global INSTALL_URL
+    INSTALL_URL = lan_base_url(int(args.port))
 
     httpd = ThreadingHTTPServer((args.bind, int(args.port)), Handler)
     httpd.daemon_threads = True
@@ -1618,7 +1644,7 @@ def main():
     if Handler.ddns.cfg:
         Handler.ddns.request_apply_async("startup")
     log(f"Pulse server v{SERVER_VERSION} listening on {args.bind}:{args.port} "
-        f"(web: {STATIC_DIR}, state: {args.state_dir})")
+        f"(web: {STATIC_DIR}, state: {args.state_dir}, install base: {INSTALL_URL})")
     log(f"auth: {'DISABLED via --no-auth (trusted LAN only!)'
          if args.no_auth else 'API key required on all dashboard-side requests'}"
         + (", TLS proxy mode (X-Forwarded-For client IPs; Secure cookie "
