@@ -70,7 +70,7 @@ die() { echo "install.sh: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---------------- arguments ----------------
-DRY_RUN=0
+DRY_RUN=""
 MODE="" URL="" PORT=8090 TOKEN_ARG=""
 POS=0
 for a in "$@"; do
