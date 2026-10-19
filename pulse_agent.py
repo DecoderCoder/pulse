@@ -23,7 +23,6 @@ Config file (KEY=VALUE):
 
 import http.client
 import hmac
-import errno
 import json
 import os
 import pwd
@@ -41,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-AGENT_VERSION = "1.2.3"
+AGENT_VERSION = "1.3.0"
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
 BOOT_TIME = time.time() - float(open("/proc/uptime").read().split()[0])
@@ -500,6 +499,7 @@ def _sysfs_cards():
             "pci_id": pci_id.lower(),
             "subsys": uevent.get("PCI_SUBSYS_ID", ":").lower(),
             "hwmon": hwmon,
+            "fan_curve": dev / "gpu_od" / "fan_ctrl" / "fan_curve",
             "busy": rfloat(dev / "gpu_busy_percent"),
             "vram_used": rfloat(dev / "mem_info_vram_used"),
             "vram_total": rfloat(dev / "mem_info_vram_total"),
@@ -507,11 +507,21 @@ def _sysfs_cards():
     return cards
 
 
-AMD_FAN_UNSUPPORTED = set()
+AMD_FAN_PRESETS = {
+    "balanced": ((35, 20), (50, 30), (65, 45), (80, 65), (95, 100)),
+    "cool": ((30, 25), (45, 40), (60, 60), (75, 80), (90, 100)),
+    "aggressive": ((25, 40), (40, 55), (55, 70), (70, 85), (85, 100)),
+}
+
+
+def _fan_curve_points(path):
+    data = rfile(path) or ""
+    return tuple((int(temp), int(speed)) for _, temp, speed in
+                 re.findall(r"^\s*(\d+):\s*(\d+)C\s*(\d+)%", data, re.M))
 
 
 def _amd_fan(card):
-    """Fan telemetry for one AMD DRM card, when its hwmon exposes PWM."""
+    """Fan telemetry and firmware-curve state for one AMD DRM card."""
     hwmon = card.get("hwmon")
     if not hwmon:
         return {}
@@ -521,55 +531,56 @@ def _amd_fan(card):
     raw = rfloat(pwm)
     maximum = rfloat(hwmon / "pwm1_max") or 255
     mode = rfloat(enable)
-    unsupported = card["card"] in AMD_FAN_UNSUPPORTED
+    curve = card["fan_curve"]
+    points = _fan_curve_points(curve) if curve.exists() else ()
+    preset = "auto" if ((points and not any(t or p for t, p in points))
+                        or (not curve.exists() and mode == 2)) else "custom"
+    for name, expected in AMD_FAN_PRESETS.items():
+        if points == expected:
+            preset = name
+            break
     return {
         "fan_pct": round(raw * 100 / maximum) if raw is not None else None,
         "fan_rpm": int(rfloat(hwmon / "fan1_input") or 0),
-        "fan_auto": mode == 2,
-        "fan_control": True,
-        "fan_writable": not unsupported and os.access(pwm, os.W_OK)
-                        and os.access(enable, os.W_OK),
-        "fan_error": "AMD driver rejected manual fan control"
-                     if unsupported else None,
+        "fan_auto": preset == "auto",
+        "fan_control": curve.exists(),
+        "fan_writable": curve.exists() and os.access(curve, os.W_OK),
+        "fan_preset": preset,
     }
 
 
-def set_amd_fan(index, auto, percent=None):
-    """Set one AMD card to driver-auto or a validated manual PWM level."""
+def set_amd_fan(index, auto, preset=None):
+    """Reset to firmware Auto or apply a validated firmware fan curve."""
     cards = [c for c in _sysfs_cards() if c["vendor"] == "1002"]
     if index < 0 or index >= len(cards):
         raise ValueError("no such AMD GPU")
-    hwmon = cards[index].get("hwmon")
-    if not hwmon or not (hwmon / "pwm1_enable").exists():
-        raise ValueError("this AMD GPU does not expose fan control")
-    enable = hwmon / "pwm1_enable"
+    curve = cards[index]["fan_curve"]
+    if not curve.exists():
+        raise ValueError("this AMD GPU does not expose firmware fan curves")
     try:
         if auto:
-            enable.write_text("2")
-            return {"auto": True}
-        percent = int(percent)
-        if percent < 20 or percent > 100:
-            raise ValueError("fan speed must be between 20 and 100%")
-        maximum = int(rfloat(hwmon / "pwm1_max") or 255)
-        enable.write_text("1")
+            curve.write_text("r")
+            curve.write_text("c")
+            return {"auto": True, "preset": "auto"}
+        preset = str(preset or "")
+        points = AMD_FAN_PRESETS.get(preset)
+        if not points:
+            raise ValueError("fan preset must be balanced, cool or aggressive")
         try:
-            (hwmon / "pwm1").write_text(str(round(percent * maximum / 100)))
+            for i, (temp, speed) in enumerate(points):
+                curve.write_text(f"{i} {temp} {speed}")
+            curve.write_text("c")
         except Exception:
             try:
-                enable.write_text("2")
+                curve.write_text("r")
+                curve.write_text("c")
             except OSError:
                 pass
             raise
-        return {"auto": False, "percent": percent}
+        return {"auto": False, "preset": preset}
     except PermissionError:
         raise PermissionError(
-            "fan control needs write access to the AMD pwm1 and pwm1_enable files")
-    except OSError as e:
-        if e.errno == errno.EINVAL:
-            AMD_FAN_UNSUPPORTED.add(cards[index]["card"])
-            raise RuntimeError(
-                "AMD driver rejected manual fan control on this GPU")
-        raise
+            "fan presets need write access to the AMD firmware fan curve")
 
 
 # ---------------------------------------------------------------- devices
@@ -1039,7 +1050,7 @@ class ActionHandler(BaseHTTPRequestHandler):
         try:
             index = int(d.get("index", 0))
             auto = bool(d.get("auto"))
-            result = set_amd_fan(index, auto, d.get("percent"))
+            result = set_amd_fan(index, auto, d.get("preset"))
             return self._send(200, {"ok": True, **result})
         except (TypeError, ValueError, PermissionError, RuntimeError, OSError) as e:
             return self._send(200, {"ok": False, "error": str(e)})

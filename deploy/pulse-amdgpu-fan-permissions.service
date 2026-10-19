@@ -1,0 +1,12 @@
+[Unit]
+Description=Grant Pulse access to AMD firmware fan curves
+Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'chgrp video /sys/class/drm/card*/device/gpu_od/fan_ctrl/* && chmod g+rw /sys/class/drm/card*/device/gpu_od/fan_ctrl/*'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
