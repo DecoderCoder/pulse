@@ -15,6 +15,7 @@ from pathlib import Path
 SERVER = "http://127.0.0.1:8090"
 TOKEN = "localtest"
 NODE = "server-1"
+GPU_FAN = {"auto": True, "percent": 34}
 PROCS = [
     ("systemd", "root", 0.3, 0.6, "systemd --system"),
     ("llama-server", "decode", 180, 18.5, "/home/decode/LLM/bin_rocm/llama-server -m Qwen3.8-27B --port 8080"),
@@ -161,7 +162,9 @@ def snap(t):
              "use": round(max(0, min(100, 78 * abs(math.sin(ph / 6)) + random.uniform(-5, 5))), 1),
              "vram_pct": 96.0, "temp": round(65 + 8 * math.sin(ph / 10), 1),
              "temp_junc": round(71 + 8 * math.sin(ph / 10), 1),
-             "gfx_clk_mhz": 2000, "mem_clk_mhz": 1249},
+             "gfx_clk_mhz": 2000, "mem_clk_mhz": 1249,
+             "fan_pct": GPU_FAN["percent"], "fan_rpm": GPU_FAN["percent"] * 43,
+             "fan_auto": GPU_FAN["auto"], "fan_control": True, "fan_writable": True},
             {"name": "card0 (iGPU)", "kind": "sysfs", "use": 0.0,
              "vram_pct": 97.0, "vram_used": 24.8 * 1024**3, "vram_total": 25.7 * 1024**3,
              "temp": None},
@@ -256,6 +259,18 @@ class Action(BaseHTTPRequestHandler):
         if isinstance(body.get("docker"), dict):
             self._send(self._docker_action(body["docker"]))
             return
+        if isinstance(body.get("gpu"), dict):
+            d = body["gpu"]
+            if d.get("cmd") != "fan":
+                return self._send({"ok": False, "error": "unknown GPU command"})
+            if d.get("auto"):
+                GPU_FAN["auto"] = True
+            else:
+                percent = int(d.get("percent", 0))
+                if not 20 <= percent <= 100:
+                    return self._send({"ok": False, "error": "fan speed must be between 20 and 100%"})
+                GPU_FAN.update(auto=False, percent=percent)
+            return self._send({"ok": True, **GPU_FAN})
         self._send({"ok": True, "pid": body.get("pid"), "sig": body.get("sig")})
 
 

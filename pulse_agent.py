@@ -40,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-AGENT_VERSION = "1.2.1"
+AGENT_VERSION = "1.2.2"
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
 BOOT_TIME = time.time() - float(open("/proc/uptime").read().split()[0])
@@ -404,6 +404,7 @@ class GpuCollector(threading.Thread):
                             if not g["name"]:
                                 g["name"] = amd_pci_name(
                                     sfs["pci_id"], sfs.get("subsys", ""))
+                            g.update(_amd_fan(sfs))
                         if not g["name"]:
                             g["name"] = "AMD GPU"
                         gpus.append(g)
@@ -491,16 +492,67 @@ def _sysfs_cards():
         except OSError:
             pass
         pci_id = uevent.get("PCI_ID", ":")
+        hwmon = next(iter(sorted((dev / "hwmon").glob("hwmon*"))), None)
         cards.append({
             "card": card.name,
             "vendor": pci_id.split(":")[0].lower(),
             "pci_id": pci_id.lower(),
             "subsys": uevent.get("PCI_SUBSYS_ID", ":").lower(),
+            "hwmon": hwmon,
             "busy": rfloat(dev / "gpu_busy_percent"),
             "vram_used": rfloat(dev / "mem_info_vram_used"),
             "vram_total": rfloat(dev / "mem_info_vram_total"),
         })
     return cards
+
+
+def _amd_fan(card):
+    """Fan telemetry for one AMD DRM card, when its hwmon exposes PWM."""
+    hwmon = card.get("hwmon")
+    if not hwmon:
+        return {}
+    pwm, enable = hwmon / "pwm1", hwmon / "pwm1_enable"
+    if not pwm.exists() or not enable.exists():
+        return {}
+    raw = rfloat(pwm)
+    maximum = rfloat(hwmon / "pwm1_max") or 255
+    mode = rfloat(enable)
+    return {
+        "fan_pct": round(raw * 100 / maximum) if raw is not None else None,
+        "fan_rpm": int(rfloat(hwmon / "fan1_input") or 0),
+        "fan_auto": mode == 2,
+        "fan_control": True,
+        "fan_writable": os.access(pwm, os.W_OK) and os.access(enable, os.W_OK),
+    }
+
+
+def set_amd_fan(index, auto, percent=None):
+    """Set one AMD card to driver-auto or a validated manual PWM level."""
+    cards = [c for c in _sysfs_cards() if c["vendor"] == "1002"]
+    if index < 0 or index >= len(cards):
+        raise ValueError("no such AMD GPU")
+    hwmon = cards[index].get("hwmon")
+    if not hwmon or not (hwmon / "pwm1_enable").exists():
+        raise ValueError("this AMD GPU does not expose fan control")
+    enable = hwmon / "pwm1_enable"
+    try:
+        if auto:
+            enable.write_text("2")
+            return {"auto": True}
+        percent = int(percent)
+        if percent < 20 or percent > 100:
+            raise ValueError("fan speed must be between 20 and 100%")
+        maximum = int(rfloat(hwmon / "pwm1_max") or 255)
+        enable.write_text("1")
+        try:
+            (hwmon / "pwm1").write_text(str(round(percent * maximum / 100)))
+        except Exception:
+            enable.write_text("2")
+            raise
+        return {"auto": False, "percent": percent}
+    except PermissionError:
+        raise PermissionError(
+            "fan control needs write access to the AMD pwm1 and pwm1_enable files")
 
 
 # ---------------------------------------------------------------- devices
@@ -936,6 +988,8 @@ class ActionHandler(BaseHTTPRequestHandler):
             return self._docker_action(body["docker"])
         if isinstance(body.get("llama"), dict):
             return self._llama_action(body["llama"])
+        if isinstance(body.get("gpu"), dict):
+            return self._gpu_action(body["gpu"])
         try:
             pid = int(body["pid"])
             sig = int(body.get("sig", 15))
@@ -961,6 +1015,17 @@ class ActionHandler(BaseHTTPRequestHandler):
         except PermissionError:
             return self._send(403, {"ok": False, "error": "permission denied"})
         self._send(200, {"ok": True, "pid": pid, "sig": sig})
+
+    def _gpu_action(self, d):
+        if d.get("cmd") != "fan":
+            return self._send(200, {"ok": False, "error": "unknown GPU command"})
+        try:
+            index = int(d.get("index", 0))
+            auto = bool(d.get("auto"))
+            result = set_amd_fan(index, auto, d.get("percent"))
+            return self._send(200, {"ok": True, **result})
+        except (TypeError, ValueError, PermissionError, OSError) as e:
+            return self._send(200, {"ok": False, "error": str(e)})
 
     # -- docker controls
     # Body: {"docker": {"cmd": "start|stop|restart", "container": name}}

@@ -1423,13 +1423,17 @@ class Handler(BaseHTTPRequestHandler):
                 fwd = {"llama": body["llama"]}
                 label = "llama " + str(fwd["llama"].get("cmd", "?"))
                 timeout = 35
+            elif isinstance(body.get("gpu"), dict):
+                fwd = {"gpu": body["gpu"]}
+                label = "gpu " + str(fwd["gpu"].get("cmd", "?"))
+                timeout = 5
             else:
                 try:
                     pid = int(body["pid"])
                     sig = int(body.get("sig", 15))
                 except (KeyError, ValueError):
                     return self._send(400, {"ok": False,
-                                            "error": "need {pid, sig}, {docker} or {llama}"})
+                                            "error": "need {pid, sig}, {docker}, {llama} or {gpu}"})
                 fwd = {"pid": pid, "sig": sig}
                 label = f"pid={pid} sig={sig}"
                 timeout = 5

@@ -2,7 +2,9 @@
 
 One **central server** with a dark web dashboard, one lightweight **agent** per
 machine. Pure Python standard library — no pip, no dependencies, no build step.
-Monitors CPU / RAM / disk / network / temperatures / GPUs (ROCm), Docker
+Monitors CPU / RAM / disk / network / temperatures / GPUs (ROCm), including
+AMD fan speed and Auto/manual PWM control when the agent can write the GPU's
+hwmon files, Docker
 containers and images, and can act on nodes (kill processes, Docker controls,
 llama.cpp start/stop) from the browser.
 
@@ -172,6 +174,7 @@ curl -s -H "X-API-Key: $KEY" "http://<server>:8090/api/series?node=NAME&points=3
 curl -s -H "X-API-Key: $KEY" -X POST -d '{"node":"NAME","pid":1234,"sig":15}'      http://<server>:8090/api/action
 curl -s -H "X-API-Key: $KEY" -X POST -d '{"node":"NAME","docker":{"cmd":"restart","container":"x"}}' http://<server>:8090/api/action
 curl -s -H "X-API-Key: $KEY" -X POST -d '{"node":"NAME","llama":{"cmd":"start","args":"./llama-server -m model.gguf -c 4096"}}' http://<server>:8090/api/action
+curl -s -H "X-API-Key: $KEY" -X POST -d '{"node":"NAME","gpu":{"cmd":"fan","index":0,"auto":false,"percent":45}}' http://<server>:8090/api/action
 
 # wake-on-lan (agent-less devices)
 curl -s -H "X-API-Key: $KEY" -X POST http://<server>:8090/api/wol/wake/<device-name>
@@ -190,7 +193,7 @@ by design.
 | `POST /api/ingest` | agent → server, `X-Pulse-Token`, **LAN-only** (the public edge 403s it); body `{v, name, agent, action_url, action_token, snap}`; `action_url` is only accepted from the agent's own ingest IP (SSRF guard) |
 | `GET /api/state` | all nodes: online flag, last_seen, latest snapshot + DDNS/WOL summaries + an `install` block (LAN base URL + ingest token — what the Install tab renders) |
 | `GET /api/series?node=NAME&points=N[&window=S]` | history for 12 metrics; without `window` the whole buffer is average-downsampled to N points, with `window=S` only the last S seconds are returned at full 2 s resolution |
-| `POST /api/action` | `{node, pid, sig}` → kill on that node; or `{node, docker: {cmd, container?, image?, force?}}` with `cmd` one of `start`, `stop`, `restart`, `remove`, `rmi`; or `{node, llama: {cmd, args\|name\|old_name\|force}}` → llama.cpp controls (`start`, `stop`, `add_preset`, `del_preset`, `log`). Expected engine failures come back as HTTP 200 `{"ok": false, "error": "…"}` |
+| `POST /api/action` | `{node, pid, sig}` → kill on that node; `{node, docker: {…}}` → Docker controls; `{node, llama: {…}}` → llama.cpp controls; or `{node, gpu: {cmd: "fan", index, auto, percent?}}` → AMD fan Auto/manual control (manual range 20–100%). Expected action failures come back as HTTP 200 `{"ok": false, "error": "…"}` |
 | `GET /api/ddns` / `POST /api/ddns` | read / save the Cloudflare DDNS config (secrets masked) |
 | `POST /api/ddns/apply` / `POST /api/ddns/test` | re-detect public IP + re-write records now / read-only zone + record listing |
 | `GET /api/wol` / `POST /api/wol` | read / replace the Wake-on-LAN device list |
