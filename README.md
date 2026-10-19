@@ -8,6 +8,10 @@ hwmon files, Docker
 containers and images, and can act on nodes (kill processes, Docker controls,
 llama.cpp start/stop) from the browser.
 
+Some Navi 31 firmware/driver combinations expose writable fan files but reject
+manual mode with `EINVAL`. Pulse detects that response, keeps Auto enabled, and
+marks the control unsupported instead of repeatedly offering a broken slider.
+
 ```
             browser ──► central server :8090 (dashboard + API, key-gated)
                                    │

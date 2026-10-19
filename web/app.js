@@ -1779,7 +1779,8 @@ function updateDevices() {
           <output class="gf-value">${g.fan_pct != null ? Math.round(g.fan_pct) : "—"}%</output>
         </div>
         ${!g.fan_control ? `<div class="gf-note">Fan control is not exposed by this GPU driver.</div>` :
-          (!g.fan_writable ? `<div class="gf-note">Read-only until PWM write permission is granted on this node.</div>` : "")}
+          (g.fan_error ? `<div class="gf-note">${esc(g.fan_error)}.</div>` :
+          (!g.fan_writable ? `<div class="gf-note">Read-only until PWM write permission is granted on this node.</div>` : ""))}
       </div>` : "";
     return `<div class="gpu-card">
       <div class="g-head">

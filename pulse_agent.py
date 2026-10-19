@@ -23,6 +23,7 @@ Config file (KEY=VALUE):
 
 import http.client
 import hmac
+import errno
 import json
 import os
 import pwd
@@ -40,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-AGENT_VERSION = "1.2.2"
+AGENT_VERSION = "1.2.3"
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
 BOOT_TIME = time.time() - float(open("/proc/uptime").read().split()[0])
@@ -506,6 +507,9 @@ def _sysfs_cards():
     return cards
 
 
+AMD_FAN_UNSUPPORTED = set()
+
+
 def _amd_fan(card):
     """Fan telemetry for one AMD DRM card, when its hwmon exposes PWM."""
     hwmon = card.get("hwmon")
@@ -517,12 +521,16 @@ def _amd_fan(card):
     raw = rfloat(pwm)
     maximum = rfloat(hwmon / "pwm1_max") or 255
     mode = rfloat(enable)
+    unsupported = card["card"] in AMD_FAN_UNSUPPORTED
     return {
         "fan_pct": round(raw * 100 / maximum) if raw is not None else None,
         "fan_rpm": int(rfloat(hwmon / "fan1_input") or 0),
         "fan_auto": mode == 2,
         "fan_control": True,
-        "fan_writable": os.access(pwm, os.W_OK) and os.access(enable, os.W_OK),
+        "fan_writable": not unsupported and os.access(pwm, os.W_OK)
+                        and os.access(enable, os.W_OK),
+        "fan_error": "AMD driver rejected manual fan control"
+                     if unsupported else None,
     }
 
 
@@ -547,12 +555,21 @@ def set_amd_fan(index, auto, percent=None):
         try:
             (hwmon / "pwm1").write_text(str(round(percent * maximum / 100)))
         except Exception:
-            enable.write_text("2")
+            try:
+                enable.write_text("2")
+            except OSError:
+                pass
             raise
         return {"auto": False, "percent": percent}
     except PermissionError:
         raise PermissionError(
             "fan control needs write access to the AMD pwm1 and pwm1_enable files")
+    except OSError as e:
+        if e.errno == errno.EINVAL:
+            AMD_FAN_UNSUPPORTED.add(cards[index]["card"])
+            raise RuntimeError(
+                "AMD driver rejected manual fan control on this GPU")
+        raise
 
 
 # ---------------------------------------------------------------- devices
@@ -1024,7 +1041,7 @@ class ActionHandler(BaseHTTPRequestHandler):
             auto = bool(d.get("auto"))
             result = set_amd_fan(index, auto, d.get("percent"))
             return self._send(200, {"ok": True, **result})
-        except (TypeError, ValueError, PermissionError, OSError) as e:
+        except (TypeError, ValueError, PermissionError, RuntimeError, OSError) as e:
             return self._send(200, {"ok": False, "error": str(e)})
 
     # -- docker controls
