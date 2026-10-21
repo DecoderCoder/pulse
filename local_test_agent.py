@@ -16,6 +16,17 @@ SERVER = "http://127.0.0.1:8090"
 TOKEN = "localtest"
 NODE = "server-1"
 GPU_FAN = {"auto": True, "preset": "auto", "percent": 34}
+STRATA = {"installed": True, "running": True, "ready": True, "pid": 4242,
+          "port": 8080, "start": int(time.time()) - 1900,
+          "model": "qwen3.8-flash-next-iq2_xs", "engine_version": "0.1.46",
+          "max_context": 210944, "images": True, "kv": "int8",
+          "expert_cache_mib": 14457, "vram_free_mib": 952,
+          "busy": True, "state": "generating", "phase": "thinking",
+          "queued": 0, "prompt_tokens": 124247, "generated": 1474,
+          "tok_s": 29.3, "tok_s_mean": 36.9, "requests": 47,
+          "gpu_util": 97, "gpu_mem_used": 25392033792,
+          "gpu_mem_total": 25753026560, "ram_used": 28541853696,
+          "ram_total": 32952098816}
 PROCS = [
     ("systemd", "root", 0.3, 0.6, "systemd --system"),
     ("llama-server", "decode", 180, 18.5, "/home/decode/LLM/bin_rocm/llama-server -m Qwen3.8-27B --port 8080"),
@@ -195,6 +206,7 @@ def snap(t):
             for i, (name, u, base_cpu, mb, cmd) in enumerate(PROCS)
         ],
         "docker": docker_snapshot(t),
+        "strata": STRATA,
     }
 
 
@@ -260,6 +272,19 @@ class Action(BaseHTTPRequestHandler):
         if isinstance(body.get("docker"), dict):
             self._send(self._docker_action(body["docker"]))
             return
+        if isinstance(body.get("strata"), dict):
+            d = body["strata"]
+            if d.get("cmd") == "log":
+                return self._send({"ok": True, "log": "[strata] fake engine ready"})
+            if d.get("cmd") == "start":
+                STRATA.update(running=True, ready=True, pid=4242,
+                              start=int(time.time()))
+                return self._send({"ok": True, "pid": 4242})
+            if d.get("cmd") == "stop":
+                STRATA.update(running=False, ready=False, pid=None, busy=False)
+                return self._send({"ok": True, "pid": 4242,
+                                   "sig": 9 if d.get("force") else 15})
+            return self._send({"ok": False, "error": "unknown Strata command"})
         if isinstance(body.get("gpu"), dict):
             d = body["gpu"]
             if d.get("cmd") != "fan":

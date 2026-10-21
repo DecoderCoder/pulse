@@ -1169,6 +1169,37 @@ tr:hover .dctl-row { opacity: 1; }
   color: var(--txt); white-space: pre-wrap; word-break: break-word;
 }
 
+/* ============================ Strata ============================ */
+.st-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 10px;
+}
+.st-metric {
+  min-width: 0; padding: 13px 14px;
+  background: linear-gradient(145deg, rgba(167, 139, 250, 0.08), rgba(0, 0, 0, 0.22));
+  border: 1px solid var(--br); border-radius: 11px; box-shadow: var(--shadow-1);
+}
+.st-metric span, .st-profile span {
+  display: block; color: var(--faint); font-size: 9.5px; font-weight: 700;
+  letter-spacing: 1.15px; text-transform: uppercase;
+}
+.st-metric b {
+  display: block; margin-top: 6px; color: var(--txt); font-family: var(--mono);
+  font-size: 16px; font-weight: 650; overflow: hidden; text-overflow: ellipsis;
+}
+.st-metric small { display: block; margin-top: 4px; color: var(--faint); font-family: var(--mono); font-size: 10px; }
+.st-profile {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  border: 1px solid var(--br); border-radius: 11px; overflow: hidden; background: var(--card);
+}
+.st-profile > div { min-width: 0; padding: 12px 14px; border-right: 1px solid var(--br); border-bottom: 1px solid var(--br); }
+.st-profile b { display: block; margin-top: 5px; color: var(--txt); font-size: 12px; overflow-wrap: anywhere; }
+.st-profile b.mono { color: var(--dim); font-size: 10.5px; }
+.st-warning {
+  color: var(--warn); font-size: 11.5px; line-height: 1.5;
+  padding: 9px 11px; border: 1px solid rgba(251, 191, 36, 0.28);
+  border-radius: 8px; background: rgba(251, 191, 36, 0.07);
+}
+
 /* responsive */
 @media (max-width: 900px) {
   .cards { grid-template-columns: 1fr; }
@@ -1681,6 +1712,9 @@ tr:hover .dctl-row { opacity: 1; }
   .cf-fields .cf-field.ttl { grid-column: span 2; }
 }
 @media (max-width: 640px) {
+  .ntabs { overflow-x: auto; scrollbar-width: none; }
+  .ntabs::-webkit-scrollbar { display: none; }
+  .ntab { flex: 0 0 auto; padding-inline: 8px; }
   .cf-facts { grid-template-columns: 1fr; }
   .cf-toggles { grid-template-columns: 1fr; }
   .mn-grid { grid-template-columns: 1fr; }

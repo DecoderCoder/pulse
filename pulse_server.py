@@ -91,7 +91,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlencode, urlparse
 
-SERVER_VERSION = "1.4.0"
+SERVER_VERSION = "1.5.0"
 INSTALL_URL = ""               # LAN base URL for the installer (set in main)
 ONLINE_WINDOW = 20.0          # seconds before a node is marked offline
 HISTORY_MAX = 10800           # ~6h at 2s resolution (per metric)
@@ -1423,6 +1423,10 @@ class Handler(BaseHTTPRequestHandler):
                 fwd = {"llama": body["llama"]}
                 label = "llama " + str(fwd["llama"].get("cmd", "?"))
                 timeout = 35
+            elif isinstance(body.get("strata"), dict):
+                fwd = {"strata": body["strata"]}
+                label = "strata " + str(fwd["strata"].get("cmd", "?"))
+                timeout = 35
             elif isinstance(body.get("gpu"), dict):
                 fwd = {"gpu": body["gpu"]}
                 label = "gpu " + str(fwd["gpu"].get("cmd", "?"))
@@ -1433,7 +1437,7 @@ class Handler(BaseHTTPRequestHandler):
                     sig = int(body.get("sig", 15))
                 except (KeyError, ValueError):
                     return self._send(400, {"ok": False,
-                                            "error": "need {pid, sig}, {docker}, {llama} or {gpu}"})
+                                            "error": "need {pid, sig}, {docker}, {llama}, {strata} or {gpu}"})
                 fwd = {"pid": pid, "sig": sig}
                 label = f"pid={pid} sig={sig}"
                 timeout = 5

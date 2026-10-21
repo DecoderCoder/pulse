@@ -40,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-AGENT_VERSION = "1.3.0"
+AGENT_VERSION = "1.4.0"
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
 BOOT_TIME = time.time() - float(open("/proc/uptime").read().split()[0])
@@ -974,6 +974,110 @@ def read_llama(procs, presets=None):
     return out
 
 
+# ---------------------------------------------------------------- Strata
+
+STRATA_LAUNCHER = ("LLM_Strata", "bin", "run-iq2_xs.sh")
+STRATA_CONFIG = (".local", "share", "strata", "install", "strata-iq2_xs.json")
+STRATA_LOG = (".local", "share", "strata", "install", "strata-iq2_xs.log")
+STRATA_CONSOLE_LOG = ("LLM_Strata", "strata-console.log")
+
+
+def _is_strata_argv(argv):
+    """True only for Strata's owning Python server, never CLI/engine children."""
+    return (any(a.endswith("/serve/server.py") for a in argv)
+            and any(argv[i:i + 2] == ["--engine", "strata"]
+                    for i in range(len(argv) - 1)))
+
+
+def _strata_pid():
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        raw = rfile(f"/proc/{entry}/cmdline")
+        argv = [x for x in (raw or "").split("\0") if x]
+        if _is_strata_argv(argv):
+            return int(entry)
+    return None
+
+
+def _strata_api(port, config):
+    """Compact local telemetry. The API key authenticates localhost only."""
+    try:
+        key = config.get("api_key", "")
+        if isinstance(key, list):
+            key = next((str(x) for x in key if str(x).strip()), "")
+        elif isinstance(key, str):
+            key = key.split(",", 1)[0].strip()
+        headers = {"Accept": "application/json"}
+        if key and str(key).lower() != "none":
+            headers["Authorization"] = "Bearer " + str(key)
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/metrics", headers=headers)
+        with urllib.request.urlopen(req, timeout=1.2) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        return {}
+    engine = data.get("engine") or {}
+    live = data.get("live") or {}
+    totals = data.get("totals") or {}
+    hw = data.get("hardware") or {}
+    requests = data.get("requests") or []
+    last = requests[0] if requests else {}
+    return {
+        "ready": True,
+        "model": engine.get("model"),
+        "engine_version": engine.get("version") or engine.get("engine"),
+        "max_context": engine.get("max_context") or engine.get("context"),
+        "images": bool(engine.get("images")),
+        "kv": engine.get("kv"),
+        "expert_cache_mib": engine.get("expert_cache_mib"),
+        "vram_free_mib": engine.get("vram_free_mib"),
+        "busy": live.get("state") not in (None, "idle"),
+        "state": live.get("state"),
+        "phase": live.get("phase"),
+        "queued": live.get("queued"),
+        "prompt_tokens": live.get("prompt_tokens"),
+        "generated": live.get("generated"),
+        "tok_s": live.get("tok_s"),
+        "tok_s_mean": live.get("tok_s_mean"),
+        "requests": totals.get("requests"),
+        "file_blobs": last.get("file_blobs"),
+        "gpu_util": hw.get("gpu_util"),
+        "gpu_mem_used": hw.get("gpu_mem_used"),
+        "gpu_mem_total": hw.get("gpu_mem_total"),
+        "ram_used": hw.get("ram_used"),
+        "ram_total": hw.get("ram_total"),
+    }
+
+
+def read_strata(procs):
+    home = Path.home()
+    launcher = home.joinpath(*STRATA_LAUNCHER)
+    config_file = home.joinpath(*STRATA_CONFIG)
+    out = {"installed": launcher.is_file() and config_file.is_file(),
+           "running": False, "ready": False, "pid": None, "cmd": None,
+           "port": None, "start": None}
+    try:
+        config = json.loads(config_file.read_text())
+    except (ValueError, OSError):
+        config = {}
+    try:
+        out["port"] = int(config.get("port") or 8080)
+    except (TypeError, ValueError):
+        out["port"] = 8080
+    out["model"] = config.get("model_name")
+    pid = _strata_pid()
+    if not pid:
+        return out
+    meta = next((p for p in procs if p["pid"] == pid), None)
+    raw = rfile(f"/proc/{pid}/cmdline")
+    argv = [x for x in (raw or "").split("\0") if x]
+    out.update({"running": True, "pid": pid, "cmd": " ".join(argv)[:600],
+                "start": meta["start"] if meta else None})
+    out.update(_strata_api(out["port"], config))
+    return out
+
+
 # ---------------------------------------------------------------- action API
 
 class ActionHandler(BaseHTTPRequestHandler):
@@ -1016,6 +1120,8 @@ class ActionHandler(BaseHTTPRequestHandler):
             return self._docker_action(body["docker"])
         if isinstance(body.get("llama"), dict):
             return self._llama_action(body["llama"])
+        if isinstance(body.get("strata"), dict):
+            return self._strata_action(body["strata"])
         if isinstance(body.get("gpu"), dict):
             return self._gpu_action(body["gpu"])
         try:
@@ -1109,6 +1215,38 @@ class ActionHandler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": False,
                                     "error": f"docker unreachable: {e}"})
 
+    @staticmethod
+    def _stop_owned_engine(pid, finder, label, force=False):
+        uid = _proc_uid(pid)
+        if uid is None:
+            return {"ok": False, "error": f"cannot read {label} owner"}
+        if uid != os.getuid() and os.geteuid() != 0:
+            return {"ok": False,
+                    "error": f"{label} (pid {pid}) belongs to another user"}
+        sig = 9 if force else 15
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return {"ok": True, "pid": pid, "sig": sig}
+        except PermissionError:
+            return {"ok": False, "error": "permission denied"}
+        if not force:
+            deadline = time.time() + 15
+            while time.time() < deadline and finder() == pid:
+                time.sleep(0.2)
+            if finder() == pid:
+                try:
+                    os.kill(pid, 9)
+                    sig = 9
+                except ProcessLookupError:
+                    pass
+        time.sleep(0.2)
+        remaining = finder()
+        if remaining:
+            return {"ok": False,
+                    "error": f"{label} (pid {remaining}) would not stop"}
+        return {"ok": True, "pid": pid, "sig": sig}
+
     # -- llama.cpp controls
     # Body: {"llama": {"cmd": "start", "args": "<full command line>"}}
     #       {"llama": {"cmd": "stop", "force": bool}}
@@ -1135,6 +1273,13 @@ class ActionHandler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": False, "error": f"bad args: {e}"})
             if not argv:
                 return self._send(200, {"ok": False, "error": "missing args"})
+            # llama.cpp and Strata share the GPU and default port.
+            replaced_strata = _strata_pid()
+            if replaced_strata:
+                stopped = self._stop_owned_engine(
+                    replaced_strata, _strata_pid, "Strata")
+                if not stopped["ok"]:
+                    return self._send(200, stopped)
             # Only one instance at a time: stop a running one first.
             replaced = None
             running = _llama_pid()
@@ -1182,8 +1327,10 @@ class ActionHandler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": False,
                     "error": f"exited immediately (code {rc})"
                              + (f": {tail}" if tail else "")})
-            note = ("replaced running instance (pid %s) — " % replaced
-                    if replaced else "") + "model load takes a moment"
+            note = (("stopped Strata (pid %s) — " % replaced_strata)
+                    if replaced_strata else "")
+            note += (("replaced running instance (pid %s) — " % replaced)
+                     if replaced else "") + "model load takes a moment"
             return self._send(200, {"ok": True, "pid": proc.pid, "note": note})
         if cmd == "stop":
             pid = _llama_pid()
@@ -1309,6 +1456,83 @@ class ActionHandler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, "preset": name})
         return self._send(200, {"ok": False,
                                 "error": f"no preset named “{name}”"})
+
+    # -- Strata controls
+    # The profile is intentionally fixed: its config owns the API key and
+    # model paths, and neither is accepted from or returned to the browser.
+    def _strata_action(self, d):
+        cmd = d.get("cmd")
+        if cmd == "start":
+            running = _strata_pid()
+            if running:
+                return self._send(200, {"ok": True, "pid": running,
+                                        "note": "already running"})
+            home = Path.home()
+            launcher = home.joinpath(*STRATA_LAUNCHER)
+            config = home.joinpath(*STRATA_CONFIG)
+            if not launcher.is_file() or not config.is_file():
+                return self._send(200, {"ok": False,
+                                        "error": "Strata IQ2_XS is not installed on this node"})
+            replaced_llama = _llama_pid()
+            if replaced_llama:
+                stopped = self._stop_owned_engine(
+                    replaced_llama, _llama_pid, "llama.cpp")
+                if not stopped["ok"]:
+                    return self._send(200, stopped)
+            try:
+                console = home.joinpath(*STRATA_CONSOLE_LOG)
+                console.parent.mkdir(parents=True, exist_ok=True)
+                with open(console, "ab") as lp:
+                    proc = subprocess.Popen(
+                        [str(launcher)], stdin=subprocess.DEVNULL,
+                        stdout=lp, stderr=subprocess.STDOUT,
+                        cwd=str(launcher.parents[1]), start_new_session=True)
+            except OSError as e:
+                return self._send(200, {"ok": False,
+                                        "error": f"start failed: {e}"})
+            time.sleep(2.0)
+            pid = _strata_pid()
+            if proc.poll() is not None or not pid:
+                tail = self._log_last_line(console)
+                return self._send(200, {"ok": False,
+                    "error": f"exited immediately (code {proc.poll()})"
+                             + (f": {tail}" if tail else "")})
+            note = ((f"stopped llama.cpp (pid {replaced_llama}) — ")
+                    if replaced_llama else "") + "model load takes a moment"
+            return self._send(200, {"ok": True, "pid": pid, "note": note})
+        if cmd == "stop":
+            pid = _strata_pid()
+            if not pid:
+                return self._send(200, {"ok": False, "error": "not running"})
+            return self._send(200, self._stop_owned_engine(
+                pid, _strata_pid, "Strata", bool(d.get("force"))))
+        if cmd == "log":
+            fp = Path.home().joinpath(*STRATA_LOG)
+            try:
+                raw = fp.read_bytes()[-16384:]
+            except OSError:
+                return self._send(200, {"ok": True, "log": "", "exists": False})
+            text = raw.decode("utf-8", "replace")
+            if len(raw) == 16384 and "\n" in text:
+                text = text.split("\n", 1)[1]
+            lines = [line for line in text.splitlines() if line.strip()][-400:]
+            return self._send(200, {"ok": True, "log": "\n".join(lines),
+                                    "exists": True})
+        return self._send(200, {"ok": False,
+                                "error": f"unknown Strata cmd: {cmd}"})
+
+    @staticmethod
+    def _log_last_line(fp, max_bytes=4096, max_chars=280):
+        try:
+            with open(fp, "rb") as lf:
+                lf.seek(0, os.SEEK_END)
+                size = lf.tell()
+                lf.seek(max(0, size - max_bytes))
+                data = lf.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
+        lines = [line.strip() for line in data.splitlines() if line.strip()]
+        return lines[-1][:max_chars] if lines else ""
 
 
 # ---------------------------------------------------------------- main agent
@@ -1502,6 +1726,7 @@ class PulseAgent:
             "procs": procs,
             "docker": self.docker.snapshot(),
             "llama": read_llama(procs, self.read_llama_presets()),
+            "strata": read_strata(procs),
         }
 
     last_collect_ts = 0.0

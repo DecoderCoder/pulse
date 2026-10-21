@@ -72,6 +72,7 @@ const tm = { sortKey: "cpu", sortDir: -1, q: "", node: null, lastData: null };
 const devCache = {};  // node -> json string of devices (skip re-render when unchanged)
 const dkCache = {};   // node -> key of last rendered docker block (structure only — cpu floats every tick)
 const llCache = {};   // node -> key of last rendered llama block
+const stCache = {};   // node -> key of last rendered Strata block
 
 /* ---------------- formatting ---------------- */
 
@@ -197,6 +198,12 @@ const sendLlamaAction = (node, act) =>
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ node, llama: act }),
+  });
+const sendStrataAction = (node, act) =>
+  api("/api/action", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ node, strata: act }),
   });
 const sendGpuAction = (node, act) =>
   api("/api/action", {
@@ -1407,6 +1414,7 @@ const NODE_TABS = [
   { id: "system", label: "System", icon: "cpu", build: buildSystemTab, update: updateSystemTab },
   { id: "docker", label: "Docker", icon: "box", build: buildDockerTab, update: updateDockerTab },
   { id: "llama", label: "Llama.cpp", icon: "zap", build: buildLlamaTab, update: updateLlamaTab },
+  { id: "strata", label: "Strata", icon: "activity", build: buildStrataTab, update: updateStrataTab },
 ];
 const nodeTab = (id) => NODE_TABS.find(t => t.id === id) || NODE_TABS[0];
 const nodeTabUrl = (name, tab) =>
@@ -1466,6 +1474,7 @@ function buildNodeTab(tabId) {
   if (tabId === "system") devCache[name] = "";
   if (tabId === "docker") dkCache[name] = "";
   if (tabId === "llama") llCache[name] = "";
+  if (tabId === "strata") stCache[name] = "";
   nodeTab(tabId).build();
 }
 
@@ -2462,6 +2471,184 @@ function llCalc() {
     <div class="llc-note">Full offload (<span class="mono">-ngl all</span>): want VRAM ≥ total. Partial offload: RAM ≥ total, VRAM ≈ the weights you move plus your share of the KV cache. Estimates assume a block-quantized GGUF — see the llama.cpp wiki for the underlying math.</div>`;
 }
 
+/* ---------------- Strata tab ---------------- */
+
+let stConsoleOpen = false;
+let stConsoleBusy = false;
+const stPending = {};  // node -> starting | stopping
+
+function buildStrataTab() {
+  $("#node-tab-body").innerHTML = `
+    <div class="section">
+      <div class="section-head"><h2>${icon("activity", 14)}Strata server</h2><span class="line"></span><span class="hint">Qwen3.8-Flash-Next · IQ2_XS</span></div>
+      <div id="st-status"></div>
+      <div class="ll-console">
+        <button class="ll-console-toggle" id="st-console-toggle" type="button" aria-expanded="false">
+          <span id="st-console-chev">▸</span>
+          <span>engine log — strata-iq2_xs.log</span>
+          <span class="ll-console-state" id="st-console-state"></span>
+        </button>
+        <pre id="st-console-pre" class="ll-console-pre" hidden></pre>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-head"><h2>${icon("chart", 14)}Live telemetry</h2><span class="line"></span><span class="hint">read from Strata on localhost; API key stays on the node</span></div>
+      <div id="st-metrics"></div>
+    </div>
+    <div class="section">
+      <div class="section-head"><h2>${icon("list", 14)}Profile</h2><span class="line"></span><span class="hint">managed by the installed Strata config</span></div>
+      <div id="st-profile"></div>
+    </div>`;
+  const toggle = $("#st-console-toggle"), pre = $("#st-console-pre"),
+        chev = $("#st-console-chev");
+  pre.hidden = !stConsoleOpen;
+  chev.textContent = stConsoleOpen ? "▾" : "▸";
+  toggle.setAttribute("aria-expanded", String(stConsoleOpen));
+  toggle.addEventListener("click", () => stConsoleToggle(state.view.name));
+  if (stConsoleOpen) stConsoleFetch(state.view.name);
+}
+
+function stConsoleToggle(node) {
+  const pre = $("#st-console-pre"), toggle = $("#st-console-toggle");
+  if (!pre || !toggle) return;
+  stConsoleOpen = !stConsoleOpen;
+  pre.hidden = !stConsoleOpen;
+  toggle.setAttribute("aria-expanded", String(stConsoleOpen));
+  $("#st-console-chev").textContent = stConsoleOpen ? "▾" : "▸";
+  if (stConsoleOpen) { pre.textContent = ""; stConsoleFetch(node); }
+  else { const s = $("#st-console-state"); if (s) s.textContent = ""; }
+}
+
+async function stConsoleFetch(node) {
+  if (!stConsoleOpen || stConsoleBusy || !state.view ||
+      state.view.type !== "node" || state.view.tab !== "strata" ||
+      state.view.name !== node) return;
+  stConsoleBusy = true;
+  try {
+    const r = await sendStrataAction(node, { cmd: "log" });
+    const pre = $("#st-console-pre");
+    if (!pre || !stConsoleOpen) return;
+    const stick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 30;
+    pre.textContent = (r.ok && r.log) ? r.log + "\n"
+      : (r.ok ? "" : "(error: " + (r.error || "unknown") + ")");
+    const s = $("#st-console-state");
+    if (s) s.textContent = (r.ok && !r.log) ? "no log yet" : "";
+    if (stick) pre.scrollTop = pre.scrollHeight;
+  } catch (e) {
+    const pre = $("#st-console-pre");
+    if (pre && stConsoleOpen) pre.textContent = "(fetch failed: " + e.message + ")";
+  } finally {
+    stConsoleBusy = false;
+  }
+}
+
+const stVal = (v, suffix = "") => v == null ? "—" : `${v}${suffix}`;
+const stGiB = mib => mib == null ? "—" : `${(mib / 1024).toFixed(1)} GiB`;
+
+function updateStrataTab() {
+  const name = state.view.name;
+  const nd = state.nodes[name];
+  if (!nd || !nd.latest) return;
+  const st = nd.latest.strata || { installed: false, running: false };
+  if (stPending[name] === "starting" && st.ready) delete stPending[name];
+  if (stPending[name] === "stopping" && !st.running) delete stPending[name];
+  const key = JSON.stringify([st, stPending[name] || null]);
+  if (stCache[name] === key) return;
+  stCache[name] = key;
+  const status = $("#st-status"), metrics = $("#st-metrics"), profile = $("#st-profile");
+  if (!status || !metrics || !profile) return;
+  const host = nd.latest.host || {};
+  const pending = stPending[name];
+
+  if (!st.installed) {
+    status.innerHTML = `<div class="dk-banner bad"><span class="dst off"></span>
+      <span>Strata is <b>not installed</b> on this node.</span></div>`;
+  } else if (!st.running) {
+    status.innerHTML = `<div class="dk-banner bad"><span class="dst off"></span>
+      <span>Strata is <b>not running</b> — the configured IQ2_XS profile is ready to launch.</span>
+      <span style="flex:1"></span><button class="btn btn-primary" id="st-start" ${pending ? "disabled" : ""}>${icon("play", 12)}${pending === "starting" ? "Starting…" : "Start Strata"}</button></div>`;
+    $("#st-start")?.addEventListener("click", () => confirmStrataStart(name, nd.latest.llama || {}));
+  } else {
+    const loading = !st.ready;
+    const busy = !!st.busy;
+    const label = loading ? "LOADING" : (busy ? "BUSY" : "READY");
+    const tone = loading ? "warn" : (busy ? "acc1" : "good");
+    const dot = loading ? "warn live" : (busy ? "warn live" : "on");
+    const phase = busy ? ` · ${esc(st.phase || st.state || "working")}` : "";
+    status.innerHTML = `<div class="dk-banner"><span class="dst ${dot}"></span>
+      <span><b style="color:var(--${tone})">${label}</b> · pid ${st.pid} · up ${ago(st.start)}${phase}</span>
+      <span style="flex:1"></span>
+      ${st.port && host.ip ? `<a class="btn" href="http://${host.ip}:${st.port}" target="_blank" rel="noopener">web ui ↗</a>` : ""}
+      <button class="btn btn-danger" id="st-stop" ${pending ? "disabled" : ""}>${icon("stop", 12)}${pending === "stopping" ? "Stopping…" : "Stop"}</button></div>
+      ${loading ? `<div class="ll-bar"><div class="ll-bar-fill load"></div><i class="ll-sheen"></i></div>` : ""}`;
+    $("#st-stop")?.addEventListener("click", () => confirmStrataStop(name, st));
+  }
+
+  const vram = (st.gpu_mem_used != null && st.gpu_mem_total)
+    ? `${(st.gpu_mem_used / 2 ** 30).toFixed(1)} / ${(st.gpu_mem_total / 2 ** 30).toFixed(1)} GiB` : "—";
+  const ram = (st.ram_used != null && st.ram_total)
+    ? `${(st.ram_used / 2 ** 30).toFixed(1)} / ${(st.ram_total / 2 ** 30).toFixed(1)} GiB` : "—";
+  metrics.innerHTML = st.running ? `<div class="st-grid">
+    <div class="st-metric"><span>Decode</span><b>${stVal(st.tok_s == null ? null : +st.tok_s.toFixed(1), " tok/s")}</b><small>mean ${stVal(st.tok_s_mean == null ? null : +st.tok_s_mean.toFixed(1), " tok/s")}</small></div>
+    <div class="st-metric"><span>Request</span><b>${st.busy ? esc(st.phase || st.state || "busy") : "idle"}</b><small>${stVal(st.generated, " generated")} · ${stVal(st.queued, " queued")}</small></div>
+    <div class="st-metric"><span>Context</span><b>${stVal(st.prompt_tokens == null ? null : Number(st.prompt_tokens).toLocaleString())}</b><small>of ${stVal(st.max_context == null ? null : Number(st.max_context).toLocaleString())} tokens</small></div>
+    <div class="st-metric"><span>Expert cache</span><b>${stGiB(st.expert_cache_mib)}</b><small>${stGiB(st.vram_free_mib)} VRAM free · ${stVal(st.file_blobs, " file-tier blobs")}</small></div>
+    <div class="st-metric"><span>GPU</span><b>${stVal(st.gpu_util, "%")}</b><small>${vram}</small></div>
+    <div class="st-metric"><span>RAM</span><b>${ram}</b><small>${stVal(st.requests, " requests total")}</small></div>
+  </div>` : `<div class="dk-none">${icon("activity", 15)}telemetry appears after the model server is running</div>`;
+
+  profile.innerHTML = `<div class="st-profile">
+    <div><span>Model</span><b>${esc(st.model || "qwen3.8-flash-next-iq2_xs")}</b></div>
+    <div><span>Engine</span><b>${esc(st.engine_version || "—")}</b></div>
+    <div><span>Context</span><b>${stVal(st.max_context == null ? null : Number(st.max_context).toLocaleString(), " tokens")}</b></div>
+    <div><span>KV cache</span><b>${esc(st.kv || "—")}</b></div>
+    <div><span>Vision</span><b>${st.images ? "GPU reader enabled" : (st.ready ? "disabled" : "—")}</b></div>
+    <div><span>Profile</span><b class="mono">~/.local/share/strata/install/strata-iq2_xs.json</b></div>
+  </div>`;
+}
+
+async function doStrataAction(node, act) {
+  try {
+    const r = await sendStrataAction(node, act);
+    stCache[node] = "";
+    return r;
+  } catch (e) {
+    toast(`${act.cmd} failed: ${e.message}`, false);
+    return { ok: false, error: e.message };
+  }
+}
+
+function confirmStrataStart(node, llama) {
+  const replacing = llama.running
+    ? `<p class="st-warning">llama.cpp pid ${llama.pid} will be stopped first. Both engines share the GPU and port 8080.</p>` : "";
+  openModal(`<h3>Start Strata?</h3>
+    <p><b>Qwen3.8-Flash-Next IQ2_XS</b> · 210,944-token context · vision enabled</p>
+    ${replacing}<p style="color:var(--faint);font-size:11.5px">Startup loads the configured profile and can take a moment. The API key remains local to this node.</p>
+    <div class="m-actions"><button class="btn" data-act="cancel">Cancel</button><button class="btn btn-primary" data-act="go">${icon("play", 12)}Start</button></div>`);
+  $$(".m-actions .btn").forEach(btn => btn.addEventListener("click", async () => {
+    if (btn.dataset.act === "cancel") return closeModal();
+    btn.disabled = true;
+    const r = await doStrataAction(node, { cmd: "start" });
+    if (r.ok) { stPending[node] = "starting"; toast(`Strata starting (pid ${r.pid})`, true); }
+    else toast(r.error || "start failed", false);
+    closeModal();
+  }));
+}
+
+function confirmStrataStop(node, st) {
+  openModal(`<h3>Stop Strata?</h3><p><b class="mono">${esc(st.model || "Strata")}</b> — pid ${st.pid}</p>
+    <p style="color:var(--faint);font-size:11.5px">SIGTERM is allowed 15 seconds before escalation. Active requests lose their connection.</p>
+    <div class="m-actions"><button class="btn" data-act="cancel">Cancel</button><button class="btn btn-danger" data-act="stop">Stop</button><button class="btn btn-kilo" data-act="stop9">Stop (force)</button></div>`);
+  $$(".m-actions .btn").forEach(btn => btn.addEventListener("click", async () => {
+    if (btn.dataset.act === "cancel") return closeModal();
+    btn.disabled = true;
+    const r = await doStrataAction(node, { cmd: "stop", force: btn.dataset.act === "stop9" });
+    if (r.ok) { stPending[node] = "stopping"; toast(`Strata stopped (pid ${r.pid}, sig ${r.sig})`, true); }
+    else toast(r.error || "stop failed", false);
+    closeModal();
+  }));
+}
+
 /* ---------------- poll + router ---------------- */
 
 function setLiveBadge() {
@@ -2585,6 +2772,8 @@ if (pollBtn && pollDrop) {
 setInterval(() => {
   if (llConsoleOpen && state.view && state.view.type === "node" &&
       state.view.tab === "llama") llConsoleFetch(state.view.name);
+  if (stConsoleOpen && state.view && state.view.type === "node" &&
+      state.view.tab === "strata") stConsoleFetch(state.view.name);
 }, 2000);
 
 scheduleTick();
