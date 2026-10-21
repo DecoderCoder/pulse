@@ -980,6 +980,7 @@ STRATA_LAUNCHER = ("LLM_Strata", "bin", "run-iq2_xs.sh")
 STRATA_CONFIG = (".local", "share", "strata", "install", "strata-iq2_xs.json")
 STRATA_LOG = (".local", "share", "strata", "install", "strata-iq2_xs.log")
 STRATA_CONSOLE_LOG = ("LLM_Strata", "strata-console.log")
+STRATA_KEY_MARKER = "__PULSE_STRATA_API_KEY__"
 
 
 def _is_strata_argv(argv):
@@ -1000,14 +1001,39 @@ def _strata_pid():
     return None
 
 
+def _strata_api_key(config):
+    key = config.get("api_key", "")
+    if isinstance(key, list):
+        return next((str(x).strip() for x in key if str(x).strip()), "")
+    return str(key).split(",", 1)[0].strip()
+
+
+def _strata_local_key():
+    try:
+        config = json.loads(Path.home().joinpath(*STRATA_CONFIG).read_text())
+    except (ValueError, OSError):
+        return ""
+    key = _strata_api_key(config)
+    return "" if key.lower() == "none" else key
+
+
+def _redact_strata_key(value, key):
+    """Remove the local Strata key from every string in an outgoing snapshot."""
+    if not key:
+        return value
+    if isinstance(value, dict):
+        return {k: _redact_strata_key(v, key) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_strata_key(v, key) for v in value]
+    if isinstance(value, str):
+        return value.replace(key, STRATA_KEY_MARKER)
+    return value
+
+
 def _strata_api(port, config):
     """Compact local telemetry. The API key authenticates localhost only."""
     try:
-        key = config.get("api_key", "")
-        if isinstance(key, list):
-            key = next((str(x) for x in key if str(x).strip()), "")
-        elif isinstance(key, str):
-            key = key.split(",", 1)[0].strip()
+        key = _strata_api_key(config)
         headers = {"Accept": "application/json"}
         if key and str(key).lower() != "none":
             headers["Authorization"] = "Bearer " + str(key)
@@ -1267,6 +1293,12 @@ class ActionHandler(BaseHTTPRequestHandler):
             args = re.sub(r"\s+", " ", str(d.get("args") or "")).strip()
             if not args:
                 return self._send(200, {"ok": False, "error": "missing args"})
+            if STRATA_KEY_MARKER in args:
+                key = _strata_local_key()
+                if not key:
+                    return self._send(200, {"ok": False,
+                        "error": "preset needs the local Strata API key, but none is configured"})
+                args = args.replace(STRATA_KEY_MARKER, key)
             try:
                 argv = shlex.split(args)
             except ValueError as e:
@@ -1416,6 +1448,7 @@ class ActionHandler(BaseHTTPRequestHandler):
         which also covers rename: old_name keeps the entry's position."""
         name = str(d.get("name") or "").strip()
         args = re.sub(r"\s+", " ", str(d.get("args") or "")).strip()
+        args = _redact_strata_key(args, _strata_local_key())
         old = str(d.get("old_name") or "").strip()
         if not name or not args:
             return self._send(200, {"ok": False, "error": "name and args are required"})
@@ -1689,7 +1722,7 @@ class PulseAgent:
         mounts = read_mount_usage(read_mounts())
         temps = read_thermals()
 
-        return {
+        snap = {
             "ts": t,
             "host": {
                 "name": self.name,
@@ -1728,6 +1761,7 @@ class PulseAgent:
             "llama": read_llama(procs, self.read_llama_presets()),
             "strata": read_strata(procs),
         }
+        return _redact_strata_key(snap, _strata_local_key())
 
     last_collect_ts = 0.0
 

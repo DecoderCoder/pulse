@@ -151,6 +151,8 @@ one-liner on it.
   throughput, context, expert-cache, GPU and RAM telemetry, tails the engine
   log, and starts/stops the fixed local profile. Its API key is read only by
   the node agent for localhost telemetry and is never included in Pulse state.
+  Matching secrets in process commands or llama presets are replaced with
+  `__PULSE_STRATA_API_KEY__` and expanded locally only when launching.
   Starting Strata stops llama.cpp first (and vice versa) because they share the
   GPU and default port.
 - **Main** — fleet overview plus **Cloudflare DDNS** (keep A/AAAA records

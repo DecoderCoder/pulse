@@ -57,6 +57,19 @@ class StrataTests(unittest.TestCase):
         self.assertTrue(result["busy"])
         self.assertNotIn("secret", json.dumps(result))
 
+    def test_snapshot_redaction_covers_nested_processes_and_presets(self):
+        secret = "strata-local-secret"
+        snapshot = {
+            "procs": [{"cmd": f"curl -H 'Bearer {secret}' /v1/models"}],
+            "llama": {"presets": [{"args": f"--api-key {secret}"}]},
+        }
+
+        clean = pulse_agent._redact_strata_key(snapshot, secret)
+
+        self.assertNotIn(secret, json.dumps(clean))
+        self.assertEqual(clean["llama"]["presets"][0]["args"],
+                         "--api-key " + pulse_agent.STRATA_KEY_MARKER)
+
 
 if __name__ == "__main__":
     unittest.main()
