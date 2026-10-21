@@ -1736,6 +1736,7 @@ function updateTM() {
 /* ---------------- devices ---------------- */
 
 const GPU_FAN_PRESETS = [
+  { id: "auto", name: "Auto", note: "Firmware" },
   { id: "balanced", name: "Balanced", note: "Everyday" },
   { id: "cool", name: "Cool", note: "Lower temps" },
   { id: "aggressive", name: "Aggressive", note: "Max airflow" },
@@ -1753,6 +1754,7 @@ function updateDevices() {
   const root = $("#nd-devices");
   if (!root) return;
   const devOpen = $$("details.dev-details", root).map(d => d.open);  // keep sections expanded across re-renders
+  const fanNodes = new Map($$(".gpu-fan[data-gpu-index]", root).map(el => [el.dataset.gpuIndex, el]));
 
   const disks = (s.mounts || []).map(m => `
     <tr>
@@ -1779,20 +1781,18 @@ function updateDevices() {
   const gpus = (s.gpu || []).map(g => {
     if (g.kind === "amd") amdIndex++;
     const tempCls = (g.temp || 0) >= 80 ? "crit" : (g.temp || 0) >= 65 ? "hot" : "";
-    const selectedPreset = GPU_FAN_PRESETS.some(p => p.id === g.fan_preset) ? g.fan_preset : "balanced";
+    const selectedPreset = g.fan_auto ? "auto" :
+      (GPU_FAN_PRESETS.some(p => p.id === g.fan_preset) ? g.fan_preset : "balanced");
     const fan = g.kind === "amd" ? `
-      <div class="gpu-fan ${g.fan_control ? "" : "unavailable"}">
+      <div class="gpu-fan ${g.fan_control ? "" : "unavailable"}" data-gpu-index="${amdIndex}"
+        data-state="${selectedPreset}" data-writable="${!!(g.fan_control && g.fan_writable)}">
         <div class="gf-head">
-          <span><b>Fan curve</b>${g.fan_rpm ? `<small>${g.fan_rpm} RPM · ${Math.round(g.fan_pct || 0)}%</small>` : ""}</span>
-          <label class="gf-auto">
-            <input type="checkbox" data-gpu-auto="${amdIndex}" ${g.fan_auto !== false ? "checked" : ""} ${g.fan_control && g.fan_writable ? "" : "disabled"}>
-            <span class="gf-switch" aria-hidden="true"></span><span>Auto</span>
-          </label>
+          <span><b>Fan curve</b>${g.fan_rpm ? `<small class="gf-live">${g.fan_rpm} RPM · ${Math.round(g.fan_pct || 0)}%</small>` : `<small class="gf-live">—</small>`}</span>
         </div>
         <div class="gf-presets" role="group" aria-label="Fan curve preset">
-          ${GPU_FAN_PRESETS.map(p => `<button type="button" class="gf-preset ${!g.fan_auto && selectedPreset === p.id ? "active" : ""}"
-            data-gpu-preset="${amdIndex}" data-preset="${p.id}" aria-pressed="${!g.fan_auto && selectedPreset === p.id}"
-            ${g.fan_auto !== false || !g.fan_control || !g.fan_writable ? "disabled" : ""}>
+          ${GPU_FAN_PRESETS.map(p => `<button type="button" class="gf-preset ${selectedPreset === p.id ? "active" : ""}"
+            data-gpu-preset="${amdIndex}" data-preset="${p.id}" aria-pressed="${selectedPreset === p.id}"
+            ${!g.fan_control || !g.fan_writable ? "disabled" : ""}>
             <span>${p.name}</span><small>${p.note}</small></button>`).join("")}
         </div>
         ${!g.fan_control ? `<div class="gf-note">Firmware fan curves are not exposed by this GPU driver.</div>` :
@@ -1859,30 +1859,37 @@ function updateDevices() {
     <div class="temp-chips">${temps}</div>` : ""}
     <details class="dev-details"><summary>PCI devices (${(s.pci || []).length})</summary><div class="dd-body">${pci}</div></details>
     <details class="dev-details"><summary>USB devices (${(s.usb || []).length})</summary><div class="dd-body">${usb}</div></details>`;
+  $$(".gpu-fan[data-gpu-index]", root).forEach(fresh => {
+    const old = fanNodes.get(fresh.dataset.gpuIndex);
+    if (!old || old.dataset.writable !== fresh.dataset.writable) return;
+    const pending = old.dataset.pending;
+    if (!pending && old.dataset.state !== fresh.dataset.state) return;
+    if (pending === fresh.dataset.state) {
+      old.dataset.state = pending;
+      delete old.dataset.pending;
+    }
+    const oldLive = $(".gf-live", old), freshLive = $(".gf-live", fresh);
+    if (oldLive && freshLive) oldLive.textContent = freshLive.textContent;
+    fresh.replaceWith(old);
+  });
   $$("details.dev-details", root).forEach((d, i) => { if (devOpen[i]) d.open = true; });
-  $$("[data-gpu-auto]", root).forEach(box => box.addEventListener("change", async () => {
-    const buttons = $$(`[data-gpu-preset="${box.dataset.gpuAuto}"]`, root);
-    buttons.forEach(b => { b.disabled = box.checked; });
-    let active = buttons.find(b => b.classList.contains("active"));
-    if (box.checked) {
-      buttons.forEach(b => { b.classList.remove("active"); b.setAttribute("aria-pressed", "false"); });
-    }
-    if (!box.checked && !active) {
-      active = buttons.find(b => b.dataset.preset === "balanced");
-      active.classList.add("active");
-      active.setAttribute("aria-pressed", "true");
-    }
-    await setGpuFan(tm.node, +box.dataset.gpuAuto, box.checked, active?.dataset.preset || "balanced");
-  }));
-  $$("[data-gpu-preset]", root).forEach(btn => btn.addEventListener("click", async () => {
-    const index = btn.dataset.gpuPreset;
-    $$(`[data-gpu-preset="${index}"]`, root).forEach(b => {
-      const active = b === btn;
-      b.classList.toggle("active", active);
-      b.setAttribute("aria-pressed", String(active));
+  if (!root.dataset.fanBound) {
+    root.dataset.fanBound = "1";
+    root.addEventListener("click", async e => {
+      const btn = e.target.closest("[data-gpu-preset]");
+      if (!btn || btn.disabled) return;
+      const index = btn.dataset.gpuPreset, fan = btn.closest(".gpu-fan");
+      $$(`[data-gpu-preset="${index}"]`, fan).forEach(b => {
+        const active = b === btn;
+        b.classList.toggle("active", active);
+        b.setAttribute("aria-pressed", String(active));
+      });
+      fan.dataset.state = btn.dataset.preset;
+      fan.dataset.pending = btn.dataset.preset;
+      const ok = await setGpuFan(tm.node, +index, btn.dataset.preset === "auto", btn.dataset.preset);
+      if (!ok) delete fan.dataset.pending;
     });
-    await setGpuFan(tm.node, +index, false, btn.dataset.preset);
-  }));
+  }
 }
 
 async function setGpuFan(node, index, auto, preset) {
@@ -1891,9 +1898,11 @@ async function setGpuFan(node, index, auto, preset) {
     const label = GPU_FAN_PRESETS.find(p => p.id === preset)?.name || preset;
     toast(r.ok ? (auto ? "AMD fan returned to firmware Auto" : `AMD fan curve: ${label}`) : (r.error || "fan action failed"), !!r.ok);
     if (!r.ok) devCache[node] = "";
+    return !!r.ok;
   } catch (e) {
     toast("fan action failed: " + e.message, false);
     devCache[node] = "";
+    return false;
   }
 }
 
